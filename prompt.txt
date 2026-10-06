@@ -1,0 +1,315 @@
+一:
+状态机架构
+Pool_msg:synchronized_pool_resource
+Pool_map:synchronized_pool_resource,map和计数指针的池
+Pool_dll:std::unordered_map std::unique_ptr<synchronized_pool_resource>
+Pool_state:全局公共可变长资源,unsynchronized_pool_resource
+
+Queue:类对象,字节流模式,可拓展环形字节缓冲队列
+	sturct Messgae{
+int _long;#本条消息字节长度
+uint64_t _handel;#托付给的handle的哈希值
+std::array<uint8_t, x> buffer;#附带信息}
+
+Dispatcher:类对象,单线程,被动响应式,当Queue字节流满一个messge后查表_handel传message给handle
+	Handle只能获得,Handle_core获得完全Map内索引
+	struct Content{State,Classptr的指针}
+	struct Core_content{State,Classptr,Handle,Handle_core,Classptr,DLLptr
+
+Map:类对象,内含多张可变长字典对uint64_t:Countptr
+	uint64_t是名称哈希过来的特异标识
+	sturct Countptr{ptr#对象指针
+	int r_count;#在读计数,读用时候+1用完毕-1
+	int w_count:#在写计数,写+1写完-1
+	bool valid;#有效性,false直接视为不存在处理	
+	
+	Handle:一般handle
+	Handle_core:内核级别handle可获得更多索引
+	State:所谓公用状态,一般也当作可变长cache
+	Classptr:所有dll类的索引
+	DLLptr:所有dll的std::pmr::unsynchronized_pool_resource索引
+
+					
+二,初始化
+完成Pool,Map的初始化,Dispatcher
+加载内核,读取根目录core.json,获得dll内核dll,主动new挂载,传入初始化的message
+加载dll,读取根目录config.json,获取要加载dll的位置,主动解析转化为message加入队列
+
+三,dll内核
+只添加
+Handle_core:作为handel的特异标识Hash("DllMgr");
+
+解析message
+std::array<uint8_t, x> buffer强类型转化为
+{int cmd,uint64_t dllname
+cmd=0,初始化,在Statenew一个可变字典Dll_dict{uint64_t(dll):vector[uint64_t(dll的Map内State和DLLptr)存储dll的所有资源
+cmd=1,加载dll,读取json配置,"State"在Pool_state调用函数把对于state托管到池管理,"Object"Pool_dll把dll类new到里面
+cmd=2,卸载dll,Dll_dict查询dllname,启动线程等待dll资源计数为0后先有效性改变再释放内存
+
+四,添加插件
+.json结构
+{
+"dll_Path"=[相对本json位置的列表]
+"Handle"=[dll内handle名称:Handle或Handle_core]
+"Object"={对象名称:对于dll函数名称}
+"State"={state名称:对于dll函数名称}
+}
+函数必须以c风格导出
+"Handle"必须输入为(
+    const uint8_t* msgData, size_t msgLen,     // 消息字节流
+    const uint8_t* ctxData, size_t ctxLen      // 上下文字节流
+);且是无状态函数
+上下文包含core,自己处理好接收不同的上下文对象
+
+
+"Object"只返回一个类
+
+"State"返回需要的公用对象
+
+
+
+
+	
+
+一、状态机架构
+
+Pool_msg
+synchronized_pool_resource，负责消息字节流的内存分配
+
+Pool_map
+synchronized_pool_resource，负责 Map 内部节点和引用计数指针的分配
+
+Pool_dll
+unordered_map<uint64_t, unique_ptr<synchronized_pool_resource>>
+以 DLL 的哈希值为键，每个 DLL 一个独立池，DLL 卸载时整池释放
+
+Pool_state
+全局公共可变长资源，unsynchronized_pool_resource
+负责跨 DLL 共享的 State 和可变长 cache
+
+Queue
+类对象，字节流模式，可扩展环形字节缓冲队列
+
+消息在队列中的布局（序列化后连续字节）：
+uint32_t _length 本条消息的总字节长度
+uint64_t _handle 目标 Handle 的哈希值
+uint8_t _buffer[] 附带信息（实际长度由 _length 决定）
+
+说明：Message 不以对象形式入队，而是序列化为连续字节。
+队首先写入 _length 和 _handle，再写入 _buffer。
+当队列中可读字节数 >= _length 时，认为一条完整消息就绪。
+
+Dispatcher
+类对象，单线程，被动响应式
+当 Queue 中积累出一条完整 Message 后，取出 _handle，查表分发
+
+Handle 可获得：Content
+Handle_core 可获得：CoreContent
+
+struct Content {
+State* state;
+Classptr* classptr;
+}
+
+struct CoreContent {
+State* state;
+Classptr* classptr;
+Handle* handle;
+Handle_core* handle_core;
+Classptr* classptr_all;
+DLLptr* dllptr;
+}
+
+Map
+类对象，内含多张可变长字典，键为 uint64_t，值为 Countptr
+键由名称哈希而来，作为全局唯一标识
+
+struct Countptr {
+void* ptr; 对象指针
+int r_count; 读计数，读取时 +1，读完 -1
+int w_count; 写计数，写入时 +1，写完 -1
+bool valid; 有效性，false 时视为不存在
+}
+
+类型说明
+Handle 一般 Handle，入口参数中只暴露 Content
+Handle_core 内核级 Handle，入口参数中暴露 CoreContent
+State 公用状态，也作为可变长 cache 使用
+Classptr 所有 DLL 类的指针索引
+DLLptr 所有 DLL 的 pmr::unsynchronized_pool_resource 索引
+
+二、初始化
+
+完成 Pool_msg、Pool_map、Pool_state、Pool_dll、Map、Dispatcher 的初始化
+
+加载内核：读取根目录 core.json，获取内核 DLL 位置，主动 LoadLibrary
+并挂载，构造一条初始 Message 传入
+
+加载普通 DLL：读取根目录 config.json，获取每个 DLL 的位置，
+解析为 Message 后加入队列，由 Dispatcher 统一分发
+
+三、DLL 内核
+
+内核只向 Map 注册一个特殊 Handle：
+Hash("DllMgr") -> Handle_core
+
+内核收到的 Message 的 buffer 强类型转化为：
+struct DllCmd {
+int cmd;
+uint64_t dll_name;
+}
+
+cmd = 0 初始化
+在 Pool_state 中创建一个可变字典 Dll_dict：
+key = uint64_t(dll_name)
+value = vector<uint64_t>，存储该 DLL 在 Map 中占用的
+所有 State 和 DLLptr 的键
+用于统一记录和释放
+
+cmd = 1 加载 DLL
+读取该 DLL 对应的 json 配置
+对 "state" 字段：在 Pool_state 中调用对应 DLL 函数，把返回的
+State 托管到池管理，并把键登记到 Dll_dict
+对 "object" 字段：在 Pool_dll 中为该 DLL 创建专属池，把 DLL
+类 new 到该池中，并把键登记到 Dll_dict
+
+cmd = 2 卸载 DLL
+通过 Dll_dict 查询 dll_name，取出该 DLL 的所有资源键
+启动等待：轮询这些资源的 r_count 和 w_count，直到全部为 0
+先统一把 valid 置为 false（阻止新的读取）
+再按顺序释放 State 和 Object，最后整池释放 Pool_dll 中该 DLL 的池
+
+四、添加插件
+
+插件配置 json 结构：
+
+{
+"dll_path": [ 相对本 json 位置的 dll 路径列表 ],
+"handle": [ 该 dll 内导出的 Handle 名称，标明类型 Handle 或 Handle_core ],
+"object": { 对象名称: 该对象对应的 dll 导出函数名称 },
+"state": { state 名称: 该 state 对应的 dll 导出函数名称 }
+}
+
+约定：
+
+所有导出函数必须使用 C 风格链接（extern "C"）
+
+"handle" 导出的函数签名必须为：
+int func(const uint8_t* msgData, size_t msgLen,
+const uint8_t* ctxData, size_t ctxLen);
+且必须为无状态函数（不依赖、不修改任何全局状态）
+
+上下文 ctxData 由 Dispatcher 按 Handle 类型构造：
+Handle -> Content
+Handle_core -> CoreContent
+插件自行按约定解析上下文
+
+"object" 导出的函数只返回一个类指针
+
+"state" 导出的函数返回需要的公用对象指针
+
+完成以下修改
+0.补充handle多作为接口或者接口+state修改,无所谓啦,怎么写有个handle解耦插件怎么设计只要是无状态得了
+按照约定,一般把非cache的状态state放在handle,完成后再修改
+1.message生命周期错误
+message结构{int _len;#字节长,uint64_t _handle;#目标handle,字节}
+dispatcher 做的是根据handel把上下文和后面字节传给handle,不同组件自己约束字节部分解析规定
+
+2.state存在语义偏差,state延申至状态机的状态,在这里是dll作为公用配置消息或者公用数据对象的,不定长只是其中功能之一,只要是要公用的配置,防止直接索引类导致依赖打结,必须挂载在state,保持约定,继续采用state为名称
+
+3.修改core_handle的结构,现在重新设计为和一般dll类一样plugin.json声明所有配置,统一风格
+
+4.修改初始化逻辑
+完成 Pool_msg、Pool_map、Pool_state、Pool_dll、Map、Dispatcher 的初始化
+读取exe同目录的congfig.json
+
+
+congfig.json包含所有要预先加载的插件的plugin.json相对位置列表,和预先流入消息队列的字节流消息列表,为统一初始化消息列表暂时采用十六进制的字节流
+
+当前项目,加载DLLMgr,然后注入其初始化消息到queue
+
+5.DLLMgr
+handle:DLLMgr_handle
+字节流强转化为{int _cmd,uint64_t _dll,string _path}
+cmd=0,初始化指令,DLLMgr.cmd(cmd=0)
+cmd=1,加载指令,DLLMgr.cmd(cmd=1,path=_path),完成加载后DLLMgr_resecoure_Dict做出对于的修改
+cmd=2,卸载指令DLLMgr.cmd(cmd=2,dll=_dll),完成后DLLMgr_resecoure_Dict做出对于的修改
+cmd=3,清空区域DLLMgr.cmd(cmd=3l)
+
+
+
+
+state:DLLMgr_resecoure_Dict一个字典用来保存所有加载dll资源的索引
+DLLMgr_link,一个路径列表,指向所有DLL组件的plugin.json相对路径,这个初始化在json手动指定要link的插件
+DLLMgr_plugin,字符串,指向DLLMgr的plugin.json相对位置
+
+
+object:DLLMgr
+cmd=0,解析DLLMgr_plugin,所有单个插件加载变成单条消息回滚queue
+cmd=3,DLLMgr_resecoure_Dict里面包含的所有插件回滚卸载指令到queue,如果当前非空回滚一条cmd=3
+
+6,重构项目文件夹
+/include#头文件
+/coment/cmakelist#公共库链接的cmake
+/scr#该文件夹下每个组件一个文件夹,每个组件都有自己的cmake可以完整编译自己
+/scr/main里面包含主程序和组织编译成完整项目的cmake
+/build#编译产物文件夹
+/test#该文件夹下每一个测试项目都有独立的cmake可以编译出完整可执行测试的项目,不同测试不同文件夹
+
+
+
+修改主程序逻辑
+1.适配多线程,新增线程池Pool_thead,用于挂载dispatcher的线程的线程池子
+新增Pool_dispatcher用来存储dispatcher对象
+2.修改核心逻辑
+Map添加Queue*与 State* / Classptr* / Handle*并列
+3.修改dispatcher逻辑,每个dispatcher与一个queue生命周期绑定
+每个dispatcher只接收一个queue的message
+,Map.Queue*可获得queue的索引
+
+dispatcher添加上下文,所有组件都可以获得Map.Queue*
+
+本质就是分流,每个dispatcher做的事情是一样的,组件可以自己申请需要queue和名称,随着组件卸载,这个线程队列也一起卸载
+如果尝试投喂,失败就走queue_core的,默认组件都使用这个
+4.修改DLL_Mgr的核心
+现在组件可以在plugin.json声明"queue":"symbol":名称,DLL_mgr就会生成新的queue和diapatcher分流
+组件可以在上下文的Map.Queue*把message主动投入到队列来分流
+Queue和dispatcher现在也加入mdpsr_state_resource_dict随着生命值管理
+
+添加后门级别的函数,DLL_init,直接创立初始化Queue和dispatcher,挂载Map.Queue*名称叫"queue_core"
+5.修改初始化逻辑
+完成原有池子和新增池子的初始化之后
+读取 exe 同目录的 config.json,config.json{"plugin"  : 要预先加载的插件 plugin.json 相对位置列表
+"init_cmd" : 后门级别函数的标签,用于直接调用初始化}
+
+
+
+C:\Users\ThinkPad\Documents\.vsconfig装了,忘记computer for ai了(((((记得把md添加这个路径
+测试不要用那两插件了,写个友好的好测试多线程读写会不会出错,继续吧
+
+修改主程序逻辑
+1.适配多线程,新增线程池Pool_thead,用于挂载dispatcher的线程的线程池子
+新增Pool_dispatcher用来存储dispatcher对象
+2.修改核心逻辑
+Map添加Queue*与 State* / Classptr* / Handle*并列
+3.修改dispatcher逻辑,每个dispatcher与一个queue生命周期绑定
+每个dispatcher只接收一个queue的message
+,Map.Queue*可获得queue的索引
+
+dispatcher添加上下文,所有组件都可以获得Map.Queue*
+
+本质就是分流,每个dispatcher做的事情是一样的,组件可以自己申请需要queue和名称,随着组件卸载,这个线程队列也一起卸载
+如果尝试投喂,失败就走queue_core的,默认组件都使用这个
+4.修改DLL_Mgr的核心
+现在组件可以在plugin.json声明"queue":"symbol":名称,DLL_mgr就会生成新的queue和diapatcher分流
+组件可以在上下文的Map.Queue*把message主动投入到队列来分流
+Queue和dispatcher现在也加入mdpsr_state_resource_dict随着生命值管理
+
+添加后门级别的函数,DLL_init,直接创立初始化Queue和dispatcher,挂载Map.Queue*名称叫"queue_core"
+5.修改初始化逻辑
+完成原有池子和新增池子的初始化之后
+读取 exe 同目录的 config.json,config.json{"plugin"  : 要预先加载的插件 plugin.json 相对位置列表
+"init_cmd" : 后门级别函数的标签,用于直接调用初始化}
+
+
+
