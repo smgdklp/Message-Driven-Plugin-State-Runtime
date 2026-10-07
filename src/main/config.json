@@ -1,0 +1,12 @@
+{
+  "_comment": "宿主 exe 同目录的初始化配置。",
+  "_plugin": "要预先装载的插件清单 (相对本文件/运行时根目录)。【必须按依赖顺序排列】: 宿主依次 LoadLibrary, 装完一个再下一个; 全部装完后给每个 handle 投一条 cmd=0 点火, 所以排在前面的组件, 后面的在 cmd=0 里就能看到它的 State。",
+  "_init_cmd": "后门级别函数的标签。宿主在已加载的模块里 GetProcAddress 找同名导出并直接调用 (不经过消息队列); 内核用它建 queue_core 并投出第一条消息。发生在 cmd=0 点火之前。",
+
+  "plugin": [
+    "core/plugin.json",
+    "ticker/plugin.json"
+  ],
+
+  "init_cmd": "core_Handle_Mgr"
+}

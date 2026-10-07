@@ -312,4 +312,79 @@ Queue和dispatcher现在也加入mdpsr_state_resource_dict随着生命值管理
 "init_cmd" : 后门级别函数的标签,用于直接调用初始化}
 
 
+重新整理文档
+1.文档应该是能够快速检索和知道约束的
+2.文档开篇把handle列出来,附带消息,还有公用的state说明,警告和规范在里面穿插
+3.最后才是组件自身的运行逻辑放后面
+
+修改image逻辑
+1.image定位为特定的泛用窗户类,自身不增加窗口,不挂载资源,只按照参数更新
+2.5.image的state,Images,修改名称为Image_rescorse,
+Image_spirit修改为指针,指向一个内存精灵图索引依旧封装指针
+添加新对象Image_lpfnWndProc,封装指针,指向一个无状态函数,用来外界挂载,
+这个无状态函数必须包含输入    UINT   message;   // 消息 ID
+    WPARAM wParam;    // 附加参数 1
+    LPARAM lParam;    // 附加参数 2
+    DWORD  time;      // 消息产生时间（tick）
+    POINT  pt;        // 消息产生时的鼠标屏幕坐标
+msg默认删掉句柄再传入,防止专一性那啥
+如果没有挂载lpfn,DispatchMessage之后,根据hwnd分发消息时候,直接默认跳过()
+
+2.接口约定提供Handle:Image_handle
+字节流解析:
+强类型或者直接读字节为
+sturct Image_cmd{
+	int _cmd;
+	uint64_t _image:#索引每个窗口特异哈希名称
+}
+cmd=1,创立窗口,state注册对应_image:SingleWindow
+cmd=2,销毁窗口,销毁对应_image
+
+4.外界自己持有自己注册的窗口的UT码了,所以直接去Image_rescorse修改对应SingleWindow
+的字节流,可以实现自己控制窗口参数和资源动画
+
+Image插件自身只维护每个窗口的更新
+
+
+5.目前当前类使用预期应该是这样的
+投入消息给Image_handle,cmd=1,_image自己随机一个名称并且记住
+然后直接查询state里面的Image_rescorse,获得对应的SingleWindow字节流
+强类型转化或者直接修改字节
+挂载无状态函数lpfnWndProc输入包含UINT   message;   // 消息 ID
+    WPARAM wParam;    // 附加参数 1
+    LPARAM lParam;    // 附加参数 2
+    DWORD  time;      // 消息产生时间（tick）
+    POINT  pt;        // 消息产生时的鼠标屏幕坐标拿不到hwnd
+挂载内存资源指针可以实现更换渲染,实现动画
+修改参数可以改变位置和裁剪
+Image_handle,cmd=2,_image用完销毁
+内存资源自己管理不关Image事情,清爽这一块
+
+再次修改主线逻辑
+所有类默认消息都采用命令行模式
+所以massage变成{uint64_t _handle ,int _len,#消息长,int _cmd,字节流}
+统一cmd=0为初始化,约等于Main
+像是image本身无主线的默认把cmd=0空出来
+
+
+因为是顺序初始化,所以config.json要按依赖顺序安排插件加载
+
+添加测试插件
+scr/lable
+综上规范
+"queue":默认的主线
+"state":不需要公用资源
+"object":Lable_test
+"handle":Lable_test_handle
+
+cmd=0,投喂一条message{uint64_t _handle=uint64_t _handle ,int _len,#消息长,int _cmd=1,uint64_t=test_message}
+加载"D:\CodingPrograms\Message-Driven Plugin State Runtime\rescourse\73ac7015de7ada77644501ec38865c08.jpg"到内存
+然后挂载这个内存到Image_rescorse对应的
+lpfnWndProc挂一个检测点击就隐藏1s
+
+cmd=1,工作函数,类内置缓存pertime,用来做计时器,如果没有要做的就把cmd=1不断丢到队列递归自己
+
+
+
+
 
