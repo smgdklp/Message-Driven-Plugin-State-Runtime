@@ -50,20 +50,63 @@
 工厂一律从 `ctx->pool`（= 本插件专属池）分配，别用 `new`/`malloc` —— 卸载时整池回收；
 `State`/`Object` 的 `_destroy` 里只做析构（`p->~T()`），不要自己 `free`。
 
-**命令行约定：命令号在帧头里，不在 body 里。** `mdpsr_handle_fn` 拿到的是
-`msg` + `body`，判命令**只读 `msg->cmd`**（帧头偏移 16）；body 里的参数"长度够才读"。
-
-| `msg->cmd` | 含义 |
-| --- | --- |
-| `MDPSR_CMD_INIT`（**0**） | **初始化，约等于别的框架里的 Main**。清单里 `Init` 指的那个 handle 会在装载完成后收到它 |
-| `1..15` | 框架保留（`REPLY` / `FAIL` / `PING` / `PONG` / `STOP`），礼貌处理，别回 `UNKNOWN_CMD` |
-| `MDPSR_CMD_USER_BASE`（**16**）起 | 插件自己的命令 |
-
-没有"主线"的组件（比如纯窗口类）把 `cmd=0` 空着、直接返回 `MDPSR_OK` 就行。
+**消息与命令号见 [§2 消息规范](#2-消息规范)。** 一句话先记住：**命令号在帧头（`msg->cmd`），不在 body 里。**
 
 ---
 
-## 2. 命名规范
+## 2. 消息规范
+
+### 帧头 `mdpsr_msg`（24 字节 = `MDPSR_MSG_HEADER`）
+
+| 偏移 | 字段 | 说明 |
+| --- | --- | --- |
+| 0 | `uint64_t dst` | 目标 handle 键 |
+| 8 | `uint64_t src` | 发送者 handle 键 |
+| **16** | `int32_t cmd` | **命令号** |
+| 20 | `int32_t len` | 整帧字节数 = `24 + body 长度` |
+| 24 | `uint8_t body[]` | 载荷，`len - 24` 字节 |
+
+★ **命令号在帧头，不在 body 里。** 别从 body 前 4 字节猜命令。
+
+### handle 签名
+
+```c
+int (*mdpsr_handle_fn)(const mdpsr_msg* msg, const uint8_t* body,
+                       uint32_t body_len, const mdpsr_ctx* ctx);
+```
+
+`body` / `body_len` 就是帧头后面那一段。body 里的参数一律**长度够才读**（先比 `body_len` 再取值）。
+
+### 保留命令号
+
+| `msg->cmd` | 名字 | body / 含义 |
+| --- | --- | --- |
+| **0** | `MDPSR_CMD_INIT` | 初始化，约等于别的框架里的 Main。**只发给清单 `Init` 指的那一个 handle**；没有主线的组件直接返回 `MDPSR_OK` 空着即可 |
+| 1 | `MDPSR_CMD_REPLY` | `mdpsr_reply` |
+| 2 | `MDPSR_CMD_FAIL` | `mdpsr_fail` |
+| 3 / 4 | `MDPSR_CMD_PING` / `PONG` | `uint32_t seq` |
+| 5 | `MDPSR_CMD_STOP` | 请对方停下自转循环 |
+| **≥ 16** | `MDPSR_CMD_USER_BASE` | 插件自己的命令都从这里往后编 |
+
+`1..15` 是框架保留段，收到不认识的**礼貌处理**，别回 `UNKNOWN_CMD`。
+
+### 怎么收发
+
+```c
+/* 发: 投给 dst 所在队列, src = 我自己 */
+host->emit(host->self, dst_key, MY_CMD, &payload, sizeof(payload));
+
+/* 回: 给 req->src 回一条 */
+host->reply(host->self, msg, MY_REPLY, &payload, sizeof(payload));
+```
+
+- `emit_from(self, dst, src, cmd, body, len)` —— 显式指定发送者
+- `emit_to(self, queue_key, dst, src, cmd, body, len)` —— 显式指定投到哪条队列
+- `reply` 的 `src` 为 0 时只记日志、不投
+
+---
+
+## 3. 命名规范
 
 ### 队列名：`Queue_<名字>`
 
@@ -107,7 +150,7 @@
 
 ---
 
-## 3. 编译快速说明
+## 4. 编译快速说明
 
 ### 主入口：根目录的 `CMakeLists.txt`
 
@@ -181,7 +224,7 @@ cmake -S . -B build -G "Visual Studio 18 2026" -A x64 `
 
 ---
 
-## 4. 怎么跑
+## 5. 怎么跑
 
 下面用默认产出目录 `build` 举例；传了 `-DBUILD=...` 就换成你自己的目录。
 
