@@ -1,0 +1,13 @@
+{
+  "name": "alpha",
+
+  "dll_path": "mdpsr_alpha.dll",
+
+  "State":  ["alpha.Stats"],
+  "Object": ["alpha.Keeper"],
+  "Handle": ["alpha.Handle"],
+  "Queue":  ["Queue_alpha"],
+  "Init":   "alpha.Handle",
+
+  "list": ["demo", "paced"]
+}

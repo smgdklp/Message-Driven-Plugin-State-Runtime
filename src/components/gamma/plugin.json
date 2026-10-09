@@ -1,0 +1,13 @@
+{
+  "name": "gamma",
+
+  "dll_path": "mdpsr_gamma.dll",
+
+  "State":  ["gamma.Ledger"],
+  "Object": ["gamma.Machine"],
+  "Handle": ["gamma.Handle.Work", "gamma.Handle.Report"],
+  "Queue":  ["Queue_gamma"],
+  "Init":   "gamma.Handle.Work",
+
+  "list": ["demo", "worker"]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "winmsg",
+
+  "dll_path": "mdpsr_winmsg.dll",
+
+  "State":  ["winmsg.Screen"],
+  "Object": ["winmsg.Shelf"],
+  "Handle": ["winmsg.Control"],
+  "Init":   "winmsg.Control",
+
+  "list": ["gui", "broker"]
+}

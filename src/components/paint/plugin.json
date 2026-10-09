@@ -1,0 +1,12 @@
+{
+  "name": "paint",
+
+  "dll_path": "mdpsr_paint.dll",
+
+  "State":  ["paint.Surface"],
+  "Handle": ["paint.Handle", "paint.Events"],
+  "Queue":  ["Queue_paint"],
+  "Init":   "paint.Handle",
+
+  "list": ["demo", "gui"]
+}

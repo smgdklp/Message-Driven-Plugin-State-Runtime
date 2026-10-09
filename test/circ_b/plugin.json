@@ -1,0 +1,12 @@
+{
+  "name": "circ_b",
+
+  "dll_path": "mdpsr_circ_b.dll",
+
+  "State":  ["circ_b.Surface"],
+  "Handle": ["circ_b.Tick", "circ_b.Events"],
+  "Queue":  ["Queue_circ_b"],
+  "Init":   "circ_b.Tick",
+
+  "list": ["gui", "test", "circle", "big-image", "draggable"]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "sysmgr",
+  "kernel": true,
+
+  "dll_path": "mdpsr_sysmgr.dll",
+
+  "State":  ["sysmgr.Status"],
+  "Object": ["sysmgr.Mgr"],
+  "Handle": ["sysmgr.Handle"],
+  "Queue":  ["Queue_sys"],
+  "Init":   "sysmgr.Handle",
+
+  "list": ["demo", "kernel"]
+}

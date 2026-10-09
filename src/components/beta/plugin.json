@@ -1,0 +1,11 @@
+{
+  "name": "beta",
+
+  "dll_path": "mdpsr_beta.dll",
+
+  "State":  ["beta.Counter"],
+  "Handle": ["beta.Handle"],
+  "Init":   "beta.Handle",
+
+  "list": ["demo", "client"]
+}

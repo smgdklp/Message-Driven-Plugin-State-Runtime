@@ -1,0 +1,30 @@
+# ============================================================================
+#  sysmgr —— 内核组件 (有 kernel 权限, 能装卸别人)
+#  既能作为大项目的一部分编译, 也能自己单独编译:
+#      cmake -S src/components/sysmgr -B build/sysmgr -G "Visual Studio 18 2026" -A x64
+# ============================================================================
+cmake_minimum_required(VERSION 3.20)
+project(mdpsr_sysmgr LANGUAGES CXX)
+
+if(NOT TARGET mdpsr_common)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../cmake"
+                     "${CMAKE_BINARY_DIR}/cmake_common")
+endif()
+
+add_library(mdpsr_sysmgr MODULE sysmgr.cpp)
+target_link_libraries(mdpsr_sysmgr PRIVATE mdpsr_common)
+
+set_target_properties(mdpsr_sysmgr PROPERTIES PREFIX "" OUTPUT_NAME "mdpsr_sysmgr")
+
+foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(mdpsr_sysmgr PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/sysmgr"
+        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/sysmgr"
+        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/sysmgr")
+endforeach()
+
+add_custom_command(TARGET mdpsr_sysmgr POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin.json"
+            "$<TARGET_FILE_DIR:mdpsr_sysmgr>/plugin.json"
+    COMMENT "copy sysmgr/plugin.json")

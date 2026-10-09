@@ -1,90 +1,72 @@
 # ============================================================================
-#  src/main/CMakeLists.txt —— 宿主 + 组织整个项目
+#  src/main/CMakeLists.txt
+#  组织整个项目: 宿主 (静态库 + 薄 exe) + 四个组件
 #
-#  入口:
-#      cmake -S src/main -B build -G "Visual Studio 18 2026" -A x64
-#      cmake --build build --config Release
-#
-#  产物 (MDPSR_OUT, 默认 <根>/build):
-#      build/mdpsr.exe              宿主
-#      build/config.json            初始化配置 (必须与 exe 同目录)
-#      build/resource/              公共素材
-#      build/core/                  内核组件
-#      build/<每个插件一个子目录>/   dll + plugin.json, 自包含 (方便单独拷走)
+#  产物布局 (每个插件一个自包含子目录, 可以整个拷走):
+#      build/mdpsr.exe
+#      build/config.json
+#      build/plugins/sysmgr/{mdpsr_sysmgr.dll, plugin.json}
+#      build/plugins/alpha/...  beta/...  gamma/...
 # ============================================================================
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    cmake_minimum_required(VERSION 3.20)
-    project(mdpsr LANGUAGES CXX)
-endif()
+cmake_minimum_required(VERSION 3.20)
+project(mdpsr LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
-endif()
+# 公共编译设置
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cmake"
+                 "${CMAKE_BINARY_DIR}/cmake_common")
 
-get_filename_component(MDPSR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-set(MDPSR_OUT "${MDPSR_ROOT}/build" CACHE PATH "编译产物目录")
-set(MDPSR_OPENCV_ROOT "D:/Cpp/Packages/opencv/build" CACHE PATH "OpenCV build 目录")
-
-message(STATUS "mdpsr 根目录  : ${MDPSR_ROOT}")
-message(STATUS "mdpsr 产物目录: ${MDPSR_OUT}")
-
-# ---------------------------------------------------------------------------
-#  公共设置
-# ---------------------------------------------------------------------------
-add_subdirectory("${MDPSR_ROOT}/src/cmake" "${CMAKE_BINARY_DIR}/cmake_common")
-
-# ---------------------------------------------------------------------------
-#  运行时静态库 —— /test 下的测试项目直接链接它
-# ---------------------------------------------------------------------------
+# ---- 宿主: 真正的运行时是一个静态库, exe 只负责 main ----
 add_library(mdpsr_runtime STATIC
-    runtime/mainmap.cpp
+    runtime/registry.cpp
     runtime/queue.cpp
     runtime/runtime.cpp
     runtime/loader.cpp
-    runtime/json.cpp
     runtime/host_api.cpp
-)
-target_link_libraries(mdpsr_runtime PUBLIC mdpsr_common)
-target_link_libraries(mdpsr_runtime PUBLIC user32)
+    runtime/json.cpp)
 
-target_include_directories(mdpsr_runtime PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/runtime")
+target_include_directories(mdpsr_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(mdpsr_runtime PUBLIC mdpsr_common winmm)
 
-# ---------------------------------------------------------------------------
-#  宿主可执行文件
-# ---------------------------------------------------------------------------
-add_executable(mdpsr main.cpp)
+# 宿主 exe = main.cpp + GUI 阶段自测 (测试代码整体待在 ./test)
+set(MDPSR_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../test")
+add_executable(mdpsr main.cpp "${MDPSR_TEST_DIR}/gui_selftest.cpp")
+target_include_directories(mdpsr PRIVATE "${MDPSR_TEST_DIR}")
 target_link_libraries(mdpsr PRIVATE mdpsr_runtime)
 
-set_target_properties(mdpsr PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${MDPSR_OUT}"
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${MDPSR_OUT}"
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${MDPSR_OUT}"
-    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${MDPSR_OUT}"
-    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${MDPSR_OUT}")
+foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(mdpsr PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}")
+endforeach()
 
-# config.json 与素材: 每次都同步 (不能只在 exe 重链时才拷 —— 只改 config.json
-# 是很常见的操作, 漏拷会让人对着旧配置排查半天)
-add_custom_target(mdpsr_runtime_files ALL
+# config.json 必须和 exe 同目录
+add_custom_command(TARGET mdpsr POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/config.json" "${MDPSR_OUT}/config.json"
-    COMMENT "同步 config.json 到运行时根目录")
-add_dependencies(mdpsr_runtime_files mdpsr)
+            "${CMAKE_CURRENT_SOURCE_DIR}/config.json"
+            "$<TARGET_FILE_DIR:mdpsr>/config.json"
+    COMMENT "copy config.json")
 
-if(EXISTS "${MDPSR_ROOT}/resource")
-    add_custom_command(TARGET mdpsr_runtime_files POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_directory
-                "${MDPSR_ROOT}/resource" "${MDPSR_OUT}/resource"
-        COMMENT "同步 resource 素材目录")
-endif()
+# ---- 组件 (src/components) ----
+set(MDPSR_COMPONENTS sysmgr alpha beta gamma winmsg paint)
+foreach(comp IN LISTS MDPSR_COMPONENTS)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../components/${comp}"
+                     "${CMAKE_BINARY_DIR}/components/${comp}")
+endforeach()
 
-# ---------------------------------------------------------------------------
-#  各组件 (每个组件的 CMakeLists 也能独立编译自己)
-# ---------------------------------------------------------------------------
-add_subdirectory("${MDPSR_ROOT}/src/components/core"  "${CMAKE_BINARY_DIR}/components/core")
-add_subdirectory("${MDPSR_ROOT}/src/components/ticker" "${CMAKE_BINARY_DIR}/components/ticker")
+# ---- 测试模块 (test/) ----
+# ★ 测试插件不进 src/: 它们是"用来压框架的东西", 不是框架的一部分。
+#   删掉整个 test/ 目录, 宿主和 winmsg 一样跑 (只是没了 GUI 自测的夹具)。
+set(MDPSR_TEST_PLUGINS circ_a circ_b circ_c)
+foreach(tp IN LISTS MDPSR_TEST_PLUGINS)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../test/${tp}"
+                     "${CMAKE_BINARY_DIR}/test_plugins/${tp}")
+endforeach()
+
+# ---- 一把梭: 构建 + 自测 ----
+add_custom_target(selftest
+    COMMAND "$<TARGET_FILE:mdpsr>" --selftest --cycles 20
+    DEPENDS mdpsr ${MDPSR_COMPONENTS} ${MDPSR_TEST_PLUGINS}
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "跑热插拔自测")
