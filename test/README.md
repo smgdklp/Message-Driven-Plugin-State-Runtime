@@ -13,10 +13,14 @@
 | --- | --- |
 | `gui_test_protocol.h` | 三个测试插件的**参数表** `kGtcProfiles[]` + **参考光栅器** `gtc_expect()`（插件和自测共用同一份，保证"期望值"和"实际画法"不会各写一遍） |
 | `gui_client_common.h` | 三个测试客户端的**公共实现**（`circ_a/b/c` 只负责把自己的导出符号接上去） |
-| `gui_selftest.{h,cpp}` | **GUI 阶段的全部断言**（122 条），宿主只调一个入口 |
+| `gui_selftest.{h,cpp}` | **GUI 阶段的全部断言**（122 条）+ `Static_State` 的装载/卸载/重载核对，宿主只调一个入口 |
 | `circ_a/` | GUI 测试插件 A：图比窗口小、换色动画、点击关窗后自愈 |
 | `circ_b/` | GUI 测试插件 B：图比窗口大（系统裁剪）、缩放动画、整窗可拖 |
 | `circ_c/` | GUI 测试插件 C：放大 2 倍 + 偏置跑到出界 |
+
+三个 `circ_*` 的 `plugin.json` 里都带一段 `Static_State`（`circ_X.Cfg`），
+用来验证"宿主装载时登记、卸载时回收、重载后回来"这条链路 —— 断言就在
+`gui_selftest.cpp` 的 `check_static_cfg()` 里，跟着热插拔那段一起跑。
 
 每个文件夹里都有自己的短 `README.md`。
 
@@ -39,7 +43,7 @@ Get-Process mdpsr | Select MainWindowTitle                 # "winmsg: paints=N"
 ```
 
 `build_TXST1\config.json` 是根 CMakeLists 生成的，内容恰好是
-`sysmgr / winmsg / paint / circ_a / circ_b / circ_c`。
+`sysmgr / winmsg / paint / circ_a / circ_b / circ_c`（`TXST1` 扫的是整个 `test/`）。
 
 > `--selftest` 会先跑热插拔压力测试再跑 GUI 阶段，所以它同时要 `alpha`/`beta`/`gamma`
 > 和这里的 `circ_*` —— **全部九个插件都在**才跑得完整。只想验 GUI 就用 `--guitest`。

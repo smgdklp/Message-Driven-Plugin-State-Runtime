@@ -186,6 +186,76 @@ int load_manifest(const std::string& rel_json, Manifest* out, std::string* err) 
     if ((r = read_tags(j["Queue"],  &m.queues,  "Queue",  err)) != MDPSR_OK) return r;
     if ((r = read_strings(j["list"], &m.list, "list", err)) != MDPSR_OK) return r;
 
+    /* ---- Static_State: {"初级名称": {"次级名称": "字符串", ...}, ...} ----
+     * 宿主只做"格式"的校验, 不看内容:
+     *   · 值的类型必须是字符串 (数字也请写成 "2") —— 猜语义是插件的活
+     *   · 这里【不】要求初级名称是 State 条目名: 宿主会拿它【登记一个新条目】
+     *     (键 = mdpsr_hash64(初级名称)), 所以它必须是个没人占用的名字。
+     *     和本插件已声明的条目撞名会在登记那一步被 name_taken 拦下并报错。
+     * 放进 Manifest 的是原样字符串; 编成 (哈希, 字节流) 是 build_static_dicts 的事。 */
+    {
+        const Json& ss = j["Static_State"];
+        if (!ss.is_null()) {
+            if (!ss.is_object()) {
+                if (err) *err = "Static_State 必须是对象: {\"初级名称\": {\"次级名称\": \"字符串\"}}";
+                return MDPSR_ERR_BAD_CONFIG;
+            }
+            if (ss.size() > MDPSR_STATIC_MAX) {
+                if (err) *err = "Static_State 的条目数超上限 (" +
+                                std::to_string(MDPSR_STATIC_MAX) + ")";
+                return MDPSR_ERR_BAD_CONFIG;
+            }
+            for (const auto& g : ss.members()) {
+                if (g.first.empty()) {
+                    if (err) *err = "Static_State 里有空初级名称";
+                    return MDPSR_ERR_BAD_CONFIG;
+                }
+                if (g.first.size() >= MDPSR_NAME_MAX) {
+                    if (err) *err = "Static_State 的初级名称太长: " + g.first;
+                    return MDPSR_ERR_NAME_TOO_LONG;
+                }
+                if (!g.second.is_object()) {
+                    if (err) *err = "Static_State[\"" + g.first + "\"] 必须是对象";
+                    return MDPSR_ERR_BAD_CONFIG;
+                }
+                if (g.second.size() > MDPSR_STATIC_ITEM_MAX) {
+                    if (err) *err = "Static_State[\"" + g.first + "\"] 的项数超上限 (" +
+                                    std::to_string(MDPSR_STATIC_ITEM_MAX) + ")";
+                    return MDPSR_ERR_BAD_CONFIG;
+                }
+                StaticGroup sg;
+                sg.entry = g.first;
+                sg.kv.reserve(g.second.size());
+                for (const auto& kv : g.second.members()) {
+                    if (kv.first.empty()) {
+                        if (err) *err = "Static_State[\"" + g.first + "\"] 里有空次级名称";
+                        return MDPSR_ERR_BAD_CONFIG;
+                    }
+                    if (kv.first.size() >= MDPSR_NAME_MAX) {
+                        if (err) *err = "Static_State[\"" + g.first + "\"] 的次级名称太长: " + kv.first;
+                        return MDPSR_ERR_NAME_TOO_LONG;
+                    }
+                    if (!kv.second.is_string()) {
+                        if (err) {
+                            *err = "Static_State[\"" + g.first + "\"][\"" + kv.first +
+                                   "\"] 的值必须是字符串";
+                        }
+                        return MDPSR_ERR_BAD_CONFIG;
+                    }
+                    sg.kv.emplace_back(kv.first, kv.second.as_string());
+                }
+                /* 同一个初级名称写两遍: json 语法允许重复键, 但这里语义上不允许 */
+                for (const StaticGroup& prev : m.static_state) {
+                    if (prev.entry == sg.entry) {
+                        if (err) *err = "Static_State 里的条目名重复: " + sg.entry;
+                        return MDPSR_ERR_BAD_CONFIG;
+                    }
+                }
+                m.static_state.push_back(std::move(sg));
+            }
+        }
+    }
+
     if (m.handles.empty()) {
         if (err) *err = "清单至少要声明一个 Handle (消息入口)";
         return MDPSR_ERR_BAD_CONFIG;
@@ -243,6 +313,43 @@ int load_manifest(const std::string& rel_json, Manifest* out, std::string* err) 
 /* ==========================================================================
  *  PluginRecord
  * ==========================================================================*/
+void PluginRecord::build_static_dicts() {
+    /* ---- "Static_State" -> 登记进注册表的字典载荷 ----
+     * 两步走: 先把 texts 全部建满, 再让 items 指过去。反过来的话, 中途 push
+     * 会让内层 vector 重分配, 先前填好的 text 就成了悬垂指针。
+     * 外层 resize 一次到位 (不是 push): &static_dicts[i] / d.name.c_str() /
+     * items.data() / texts[j].data() 的地址之后一辈子不变 —— Entry::ptr 指着它们。 */
+    static const uint8_t kEmptyText = 0;   /* 空值的落点, 保证 text 永远非空 */
+
+    static_dicts.clear();
+    static_dicts.resize(m.static_state.size());
+    for (size_t gi = 0; gi < m.static_state.size(); ++gi) {
+        const StaticGroup& g = m.static_state[gi];
+        StaticDict& d = static_dicts[gi];
+        d.name = g.entry;
+        d.key  = mdpsr_hash64(d.name.c_str());
+
+        d.texts.resize(g.kv.size());
+        d.items.resize(g.kv.size());
+        for (size_t i = 0; i < g.kv.size(); ++i) {
+            /* 字符串按原字节拷进来 —— 清单文件本身是 UTF-8, 所以存的就是 UTF-8 字节流 */
+            d.texts[i].assign(g.kv[i].second.begin(), g.kv[i].second.end());
+
+            mdpsr_static_item& it = d.items[i];
+            it.key = mdpsr_hash64(g.kv[i].first.c_str());   /* 次级名称的哈希 */
+            /* ★ text 恒非空: 空值指向一个空字节。这样插件只管看 len, 不用先判 text */
+            it.text = d.texts[i].empty() ? &kEmptyText : d.texts[i].data();
+            it.len  = static_cast<uint32_t>(d.texts[i].size());   /* 字节数, 不是字符数 */
+            it.reserved = 0;
+        }
+
+        d.dict.magic = MDPSR_STATIC_MAGIC;
+        d.dict.count = static_cast<uint32_t>(d.items.size());
+        d.dict.items = d.items.empty() ? nullptr : d.items.data();
+        d.dict.name  = d.name.c_str();
+    }
+}
+
 void PluginRecord::rebuild_fctx(const mdpsr_host* host) {
     uint32_t n = 0;
     for (const std::string& s : m.list) {
@@ -251,6 +358,7 @@ void PluginRecord::rebuild_fctx(const mdpsr_host* host) {
         list_ptr[n] = list_buf[n];
         ++n;
     }
+
     fctx = mdpsr_factory_ctx{};
     fctx.struct_size     = sizeof(mdpsr_factory_ctx);
     fctx.list_count      = n;
@@ -282,9 +390,13 @@ static bool trace_on() {
 #define MDPSR_STEP(rt_ptr, msg) do { if (trace_on()) (rt_ptr)->log(0, std::string("[trace] ") + (msg)); } while (0)
 
 /* 造一个"某条目专属"的工厂上下文: 复制插件级 fctx, 只改 name。
- * 从插件池分配, 随卸载一起回收 —— 析构要用的就是它。 */
+ * 从插件池分配, 随卸载一起回收 —— 析构要用的就是它。
+ *
+ * ★ "Static_State" 不从这里发下去: 它是宿主登记进注册表的条目, 插件在运行时
+ *   用普通 acquire(初级名称) 取 —— 所以工厂上下文里没有它的位置。 */
 static mdpsr_factory_ctx* make_entry_fctx(PluginRecord* rec, const Pool* pool,
                                           const std::string& entry_name) {
+    (void)entry_name;
     void* mem = const_cast<Pool*>(pool)->res.allocate(sizeof(mdpsr_factory_ctx),
                                                       alignof(mdpsr_factory_ctx));
     if (!mem) return nullptr;
@@ -610,7 +722,47 @@ int Runtime::plugin_install(const std::string& manifest_rel, const mdpsr_install
         log(0, "  handle " + he.name);
     }
 
-    /* ---- 10. 上线 ---- */
+    /* ---- 10. Static_State: 宿主把静态配置登记成注册表条目 ----
+     *
+     *  ★ 这一步整个是宿主(工厂)的事, 插件侧没有任何新导出、也不需要 JSON 解析器:
+     *      每个【初级名称】登记成一个 STATE 条目,
+     *          键   = mdpsr_hash64(初级名称)
+     *          载荷 = mdpsr_static_dict (次级名称哈希 -> UTF-8 字节流)
+     *    插件的 Handle 里直接 acquire(初级名称) 就能拿到, 而且因为是 STATE,
+     *    别的插件也借得到 —— 它本来就是"公用数据对象"。
+     *
+     *  ★ 键和别的条目一样推进 rec->entries: 于是上线门闸 (下面的 publish)、
+     *    卸载 (plugin_unload 的批量 detach)、重载全都自动覆盖到它,
+     *    不需要额外写一条"卸载也要卸载"的路径。
+     *
+     *  ★ published=false 挂上, 和本插件其它条目一起 publish —— 这样不会出现
+     *    "插件还没 READY, 别人先借到了它的配置"的窗口。 */
+    if (!rec->m.static_state.empty()) {
+        rec->build_static_dicts();
+        for (PluginRecord::StaticDict& d : rec->static_dicts) {
+            /* 撞名就是写错了: 初级名称必须是个没人占的名字 (它不是 State 条目名) */
+            if (_reg.name_taken(d.name.c_str(), 0)) {
+                return fail(MDPSR_ERR_ALREADY_EXISTS,
+                            "Static_State 的初级名称 '" + d.name +
+                            "' 已经被别的条目占用 (它必须是本插件自己新起的名字)");
+            }
+
+            /* 载荷从本插件的池里出: 随卸载整池回收, 且会计进池的分配计数 */
+            void* mem = _reg.pool_alloc(rec->pool, sizeof(mdpsr_static_dict),
+                                        alignof(mdpsr_static_dict));
+            if (!mem) return fail(MDPSR_ERR_NO_SPACE, "Static_State '" + d.name + "' 载荷分配失败");
+            auto* payload = new (mem) mdpsr_static_dict(d.dict);
+
+            Entry* e = nullptr;
+            const int ar = _reg.attach(d.key, MDPSR_KIND_STATE, pkey, rec->gen,
+                                       d.name.c_str(), payload, nullptr, nullptr, false, &e);
+            if (ar != MDPSR_OK) return fail(ar, "Static_State '" + d.name + "' 登记失败");
+            rec->entries.push_back(d.key);
+            log(0, "  static " + d.name + " (" + std::to_string(d.dict.count) + " 项)");
+        }
+    }
+
+    /* ---- 11. 上线 ---- */
     rec->install_count++;
     rec->last_install_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -872,6 +1024,7 @@ int Runtime::plugin_uninstall(uint64_t plugin, uint32_t flags) {
 
     rec->entries.clear();
     rec->queue_keys.clear();
+    rec->static_dicts.clear();   /* 条目已 detach; 这边的稳定副本也一并放掉 */
     rec->status.store(MDPSR_PLUGIN_EMPTY, std::memory_order_release);
 
     /* ---- 9. 最后才放 handle 锁 ---- */

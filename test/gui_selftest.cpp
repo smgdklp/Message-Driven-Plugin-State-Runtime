@@ -318,6 +318,66 @@ void check_point(Ctx& c, const GtcProfile& p, uint64_t wname, uint32_t color,
 /* --------------------------------------------------------------------------
  *  一个测试插件的完整检查
  * ------------------------------------------------------------------------*/
+/* --------------------------------------------------------------------------
+ *  "Static_State" 的核对
+ *
+ *  ★ 这个特性整个是宿主侧的: 装载插件时顺手登记, 卸载时随其它条目一起摘掉。
+ *    所以口径就三件事 —— 装着的时候借得到、内容对; 卸了就借不到;
+ *    重装/重载之后又借得到。
+ * ------------------------------------------------------------------------*/
+/* 借到手核对内容; want_present == false 则期望"借不到" */
+void check_static_cfg(Ctx& c, const char* plugin, bool want_present) {
+    const std::string name = std::string(plugin) + ".Cfg";   /* 初级名称 */
+    const uint64_t key = mdpsr_hash64(name.c_str());
+
+    void*    p = nullptr;
+    uint32_t g = 0;
+    const int ar = c.rt->reg().acquire(key, 0, &p, &g);
+    if (ar != MDPSR_OK) {
+        /* 卸载之后必须借不到 —— 还借得到才说明"卸载没把配置摘掉" */
+        if (want_present) {
+            bad(c, name + ": 应该借得到却借不到 (rc=" + std::to_string(ar) + ")");
+        } else {
+            ok(c, name + ": 卸载后确实借不到了 (rc=" + std::to_string(ar) + ")");
+        }
+        return;
+    }
+    if (!want_present) {
+        c.rt->reg().release(key);
+        bad(c, name + ": 卸载之后居然还借得到 (配置没随插件摘掉)");
+        return;
+    }
+
+    const mdpsr_static_dict* d = static_cast<const mdpsr_static_dict*>(p);
+    expect(c, d->magic == MDPSR_STATIC_MAGIC, name + ": magic 不对");
+    expect(c, d->count == 3, name + ": 项数应为 3, 实际 " + std::to_string(d->count));
+    expect(c, d->name && std::strcmp(d->name, name.c_str()) == 0, name + ": dict.name 不对");
+
+    const mdpsr_static_item* gr = mdpsr_static_find(d, mdpsr_hash64("greeting"));
+    expect(c, gr != nullptr, name + ": 找不到 greeting");
+    if (gr) {
+        /* ★ len 是【字节数】不是字符数: "你好, mdpsr" 的 UTF-8 正好 13 字节 */
+        expect(c, gr->len == 13,
+               name + ": greeting 的 len 应为 13 字节 (UTF-8), 实际 " + std::to_string(gr->len));
+        const std::string v(reinterpret_cast<const char*>(gr->text), gr->len);
+        expect(c, v == "你好, mdpsr", name + ": greeting 内容不对: " + v);
+        expect(c, gr->text != nullptr, name + ": text 不该是 NULL (空值也该指向空字节)");
+    }
+    const mdpsr_static_item* sc = mdpsr_static_find(d, mdpsr_hash64("scale"));
+    expect(c, sc != nullptr, name + ": 找不到 scale");
+    if (sc) {
+        const std::string v(reinterpret_cast<const char*>(sc->text), sc->len);
+        expect(c, v == "2", name + ": scale 应为 \"2\", 实际 " + v);
+    }
+    const mdpsr_static_item* em = mdpsr_static_find(d, mdpsr_hash64("empty"));
+    expect(c, em != nullptr, name + ": 找不到 empty");
+    if (em) expect(c, em->len == 0, name + ": empty 的 len 应为 0");
+    expect(c, mdpsr_static_find(d, mdpsr_hash64("no-such-key")) == nullptr,
+           name + ": 不存在的次级名称本该返回 NULL");
+    ok(c, name + ": 借到静态配置, " + std::to_string(d->count) + " 项, 内容与字节数都对");
+
+    c.rt->reg().release(key);
+}
 void check_client(Ctx& c, const GtcProfile& p, int cycles, bool quick) {
     Runtime& rt = *c.rt;
     const uint64_t wname = mdpsr_hash64(p.window);
@@ -524,7 +584,9 @@ void check_client(Ctx& c, const GtcProfile& p, int cycles, bool quick) {
         }
     }
 
-    /* 7. 热插拔: 卸载 -> 窗口消失; 装回 -> 窗口又可见; 再重载 N 轮 */
+    /* 7. 热插拔: 卸载 -> 窗口消失; 装回 -> 窗口又可见; 再重载 N 轮
+     *    顺带把 "Static_State" 的生命周期一起核了: 宿主在装载时登记它,
+     *    卸载时随其它条目一起摘掉 —— 所以"借得到 / 借不到"各应出现一次。 */
     {
         const size_t base_entries = rt.reg().size();
         uint32_t base_queues = 0;
@@ -533,13 +595,18 @@ void check_client(Ctx& c, const GtcProfile& p, int cycles, bool quick) {
         char manifest[128];
         std::snprintf(manifest, sizeof(manifest), "plugins/%s/plugin.json", p.plugin);
 
+        /* 装着的时候: 静态配置借得到, 内容与字节数都对 */
+        check_static_cfg(c, p.plugin, true);
+
         int rc = rt.plugin_uninstall(pkey, 0);
         expect(c, rc == MDPSR_OK, std::string(p.plugin) + ": 卸载失败 rc=" + std::to_string(rc));
         if (rc == MDPSR_OK) {
             expect(c, wait_gone(c, wname, 3000), std::string(p.plugin) + ": 卸载后窗口还在");
-            expect(c, rt.reg().size() == base_entries - 4,
+            expect(c, rt.reg().size() == base_entries - 5,
                    std::string(p.plugin) + ": 卸载后条目没回到基线 (" +
                        std::to_string(rt.reg().size()) + " vs " + std::to_string(base_entries) + ")");
+            /* ★ 卸载之后静态配置必须跟着消失 */
+            check_static_cfg(c, p.plugin, false);
         }
         rc = rt.plugin_install(manifest, nullptr, nullptr);
         expect(c, rc == MDPSR_OK, std::string(p.plugin) + ": 重装失败 rc=" + std::to_string(rc));
@@ -548,6 +615,8 @@ void check_client(Ctx& c, const GtcProfile& p, int cycles, bool quick) {
                    std::string(p.plugin) + ": 重装后窗口不在/不可见 (★ 这一条就是那个 bug 的回归测试)");
             expect(c, rt.reg().size() == base_entries,
                    std::string(p.plugin) + ": 重装后条目没回到基线");
+            /* ★ 重装之后静态配置又回来了 */
+            check_static_cfg(c, p.plugin, true);
         }
 
         const int rounds = quick ? 1 : cycles;
@@ -571,6 +640,8 @@ void check_client(Ctx& c, const GtcProfile& p, int cycles, bool quick) {
             good_note(c, std::string(p.plugin) + ": 卸载/装回/重载 " + std::to_string(rounds) +
                           " 轮, 每轮窗口都回来了而且是可见的");
         }
+        /* ★ 重载同样要重建静态配置 —— 它跟着新一轮装载一起登记 */
+        check_static_cfg(c, p.plugin, true);
         uint32_t end_queues = 0;
         rt.queue_list(nullptr, 0, &end_queues);
         expect(c, end_queues == base_queues,

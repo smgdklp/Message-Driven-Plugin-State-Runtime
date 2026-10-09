@@ -8,5 +8,13 @@
   "Queue":  ["Queue_circ_a"],
   "Init":   "circ_a.Tick",
 
-  "list": ["gui", "test", "circle", "small-image"]
+  "list": ["gui", "test", "circle", "small-image"],
+
+  "Static_State": {
+    "circ_a.Cfg": {
+      "greeting": "你好, mdpsr",
+      "scale":    "2",
+      "empty":    ""
+    }
+  }
 }

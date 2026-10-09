@@ -21,7 +21,12 @@
   "Handle":   ["hello.Handle"],         // 消息入口 -> mdpsr_handle_hello_Handle
   "Queue":    ["Queue_hello"],          // 可选, 省了就落 Queue_default
   "Init":     "hello.Handle",           // 可选: 谁的 cmd=0 是初始化入口
-  "list":     ["demo", "paced"]         // 可选: 给工厂的附加字符串数组
+  "list":     ["demo", "paced"],        // 可选: 给工厂的附加字符串数组
+  "Static_State": {                     // 可选: 静态配置, 宿主会登记成公用 STATE 条目
+    "hello.Cfg": {                      //   初级名称 (宿主新起的条目名, 不能和别处撞)
+      "scale": "2"                      //   次级名称 -> 字符串 (必须都是字符串)
+    }
+  }
 }
 ```
 
@@ -37,7 +42,8 @@
 | `Queue` | 声明自己要用（或要建）的**分流队列**；省略 = 用宿主的 `Queue_default` | `int mdpsr_queue_<队列名>(const mdpsr_factory_ctx*, mdpsr_queue_desc*)`<br>只回答 `capacity` / `pace_ms`；找不到这个导出就退回默认参数 |
 | `Init` | **谁的 `cmd=0` 是初始化入口**；必须在 `Handle` 里声明过 | —— |
 | `kernel` | `true` 才有装卸别的插件的权限（默认 `false`） | —— |
-| `list` | 给工厂的附加字符串数组 | 工厂里从 `ctx->list` / `ctx->list_count` 取 |
+| `list` | 给工厂的附加字符串数组（插件级，所有工厂共用一份） | 工厂里从 `ctx->list` / `ctx->list_count` 取 |
+| `Static_State` | **静态配置**：`{"初级名称": {"次级名称": "字符串"}}`。**宿主在装载时**按初级名称登记一个公用 `STATE` 条目（键 = `mdpsr_hash64(初级名称)`），卸载时一起摘掉 | 插件侧没有新导出：运行时 `acquire(初级名称)` 拿 `mdpsr_static_dict`（见下） |
 
 **模块本身必须导出三个：**
 
@@ -49,6 +55,135 @@
 
 工厂一律从 `ctx->pool`（= 本插件专属池）分配，别用 `new`/`malloc` —— 卸载时整池回收；
 `State`/`Object` 的 `_destroy` 里只做析构（`p->~T()`），不要自己 `free`。
+
+### 借资源：State / Object 怎么用
+
+**每个条目自带一把内核锁，插件不用自己加** —— `acquire` 拿、`release` 放：
+
+```c
+const uint64_t key = mdpsr_hash64("alpha.Stats");
+void*    p = NULL;
+uint32_t g = 0;
+if (host->acquire(host->self, key, 0, &p, &g) == MDPSR_OK) {   /* want_gen 0 = 哪一代都行 */
+    ... 用 p ...
+    host->release(host->self, key);
+}
+```
+
+| 规则 | 说明 |
+| --- | --- |
+| 一次借多个 | **`acquire_many` 推荐**：全有或全无，宿主内部按键升序；用完 `release_all` |
+| **按键升序** | 同线程多次 `acquire`，**键必须严格递增**，否则 `MDPSR_ERR_LOCK_ORDER`(11014) —— 防死锁 |
+| 有界等待 | **不是无限等**：最多 `MDPSR_LOCK_WAIT_MS(50ms) × MDPSR_LOCK_TRIES(8)`，等不到返回 `MDPSR_ERR_BUSY`(11011)，回滚重来即可 |
+| 代际 | 传上次拿到的 `gen` 就能检出"换过代了" → `MDPSR_ERR_STALE`(11015)；传 0 则哪代都行 |
+| 兜底归还 | 调用返回时宿主把这次借到的一起还掉；`release` 没借过的键 → `MDPSR_ERR_ENTRY_INVALID`(12002) |
+
+⚠ **想在 State 里托管"指向别人的通用代理指针"，存键不存指针：**
+
+```c
+struct MyState { uint64_t target_key; uint32_t target_gen; };   /* 代理 = 键 + 代 */
+```
+
+`Entry`（旧树里叫 `Countptr`）是**宿主内部的控制块，不在 ABI 里** —— 插件看不到也拿不到，别指望把它塞进 State。存 `(key, gen)` 天然跨代/跨重载安全，要用时现 `acquire` 解析。
+
+### 池
+
+`ctx->pool` 是个不透明封装指针 `mdpsr_pool*`（每插件一份），可反复复用：
+
+```c
+void* p = host->pool_alloc(host->self, ctx->pool, bytes, align);
+host->pool_free (host->self, ctx->pool, p, bytes, align);
+```
+
+拿别的插件的池 → `MDPSR_ERR_POOL_MISMATCH`(11018)。**卸载时整池销毁**，所以"忘了 free"最坏只在这个插件的一生里占着，不会泄漏到别人头上；工厂里想提前还就用 `mdpsr_fctx_free(ctx, p, n, a)`。
+
+### 静态参数：怎么写
+
+清单**只认固定那几个键**（上面那张表）。**你自己加的字段没人读、也不会注入** —— 想给插件塞静态参数，正规通道就是顶层那个 **`list`**：
+
+```jsonc
+{
+  "name":     "hello",
+  "dll_path": "mdpsr_hello.dll",
+  "Handle":   ["hello.Handle"],
+  "list":     ["rescourse/a.png", "128", "fast"]   // ← 你的静态参数
+}
+```
+
+它是**插件级**的字符串数组（不是每个条目各一份），**本插件的所有工厂**拿到的是同一份：
+
+```c
+void* mdpsr_state_hello_Count(const mdpsr_factory_ctx* ctx) {
+    for (uint32_t i = 0; i < ctx->list_count; ++i) {
+        const char* s = ctx->list[i];         /* "rescourse/a.png" / "128" / "fast" */
+    }
+    /* ctx->manifest_dir 是基准目录, 要读文件就从它拼绝对路径 */
+}
+```
+
+**想要结构化参数**（不是纯字符串数组）就两步：
+
+1. `list[0]` 放你自己的配置文件路径（相对 `ctx->manifest_dir`）
+2. 插件自己读那个 json 并校验 —— 里面想加什么字段都随你
+
+框架只负责把 `list` 原样递过来，解析和校验是插件自己的事。工厂上下文里能拿到的还有：`name`（本条目名）/ `plugin_name` / `manifest_path` / `manifest_dir` / `plugin` / `plugin_gen` / `host` / `pool`。
+
+### 结构化静态配置：`Static_State`
+
+上面那条 `list` 是**插件级扁平字符串数组**。要结构化、而且**能在运行时读写**，用 `Static_State`：
+
+```jsonc
+"Static_State": {
+  "my.cfg": {                        // 初级名称: 宿主会拿它登记一个新条目
+    "greeting": "你好, mdpsr",         // 次级名称 -> 字符串
+    "scale":    "2"
+  }
+}
+```
+
+**这是宿主（工厂）自己干的活，插件侧什么都不用加** —— 装载插件时宿主顺便做两件事：
+
+1. 拿**初级名称**登记一个 `STATE` 条目，键 = `mdpsr_hash64(初级名称)`；
+2. 条目载荷是一个字典：`mdpsr_hash64(次级名称)` → **UTF-8 字节流**。
+
+条目和本插件的其它条目**一起上线**（同过 `publish` 门闸），卸载时**一起摘掉**，重载后自动回来。
+
+插件侧直接 `acquire` 就行 —— 不需要新工厂、不需要 JSON 解析器：
+
+```c
+void*    p = NULL;
+uint32_t g = 0;
+if (mdpsr_acquire(host, mdpsr_hash64("my.cfg"), 0, &p, &g) == MDPSR_OK) {
+    const mdpsr_static_dict* d = (const mdpsr_static_dict*)p;
+    const mdpsr_static_item* it = mdpsr_static_find(d, mdpsr_hash64("scale"));
+    if (it) {
+        it->text;   /* UTF-8 字节流, 恒非空, 不保证 NUL 结尾 */
+        it->len;    /* ★ 权威长度 (字节数), 一律按它读 */
+    }
+    mdpsr_release(host, mdpsr_hash64("my.cfg"));
+}
+```
+
+| 规则 | 说明 |
+| --- | --- |
+| 值必须是**字符串** | 写 `2` 而不是 `"2"` → 装载时 `BAD_CONFIG`。宿主不替你猜语义 |
+| 初级名称要**没人占** | 它是宿主新登记条目的名字。和本插件已声明的条目撞名 → 装载时 `ALREADY_EXISTS` 报错 |
+| 是**公用 State** | kind = `STATE`，所以**别的插件也借得到** —— 它本来就是公用数据 |
+| 没写就没有 | 该初级名称的条目根本不存在，`acquire` 失败 |
+| 上限 | 一个清单最多 16 组，每组最多 32 项（内核侧常量，不在 ABI 里） |
+| 载荷 | `mdpsr_static_dict{ magic, count, items, name }`，先看 `magic` 自证 |
+
+**字节流 → UTF-8 文本**：`text` 存的**就是** UTF-8 编码的字节，按 `len` 原样收下即可：
+
+```c
+std::string v(reinterpret_cast<const char*>(it->text), it->len);   // 本身就是 UTF-8
+```
+
+三个坑：**别 `strlen`**（不保证 NUL 结尾）、**别把字节数当字符数**（一个汉字 3 字节）、**空值也要看 `len`**（`len == 0`，但 `text` 仍非空）。
+
+**它是注册表里的普通 STATE 条目，所以运行时改得了** —— 借到手直接写，改短/改长自己管好 `len`；借还规则见上面「借资源」那节。
+
+**怎么选**：`list` = 插件级扁平数组，工厂建对象时读一次；`Static_State` = 结构化、挂成公用 State、运行时还能读写。
 
 **消息与命令号见 [§2 消息规范](#2-消息规范)。** 一句话先记住：**命令号在帧头（`msg->cmd`），不在 body 里。**
 

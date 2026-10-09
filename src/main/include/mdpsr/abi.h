@@ -239,6 +239,70 @@ typedef struct mdpsr_install_opts {
 } mdpsr_install_opts;
 
 /* ==========================================================================
+ *  静态配置 —— 清单里的 "Static_State" 字段
+ *
+ *  清单顶层可以写:
+ *      "Static_State": {
+ *          "my.cfg": {                       <- 初级名称 (宿主拿它登记一个条目)
+ *              "greeting": "你好, mdpsr",     <- 次级名称 -> 字符串
+ *              "scale":    "2"
+ *          }
+ *      }
+ *
+ *  ★ 这是【宿主装载插件时顺便做的事】, 不是插件工厂的活:
+ *      宿主解析清单 -> 为每个【初级名称】登记一个 STATE 条目,
+ *          条目键   = mdpsr_hash64(初级名称)
+ *          条目载荷 = mdpsr_static_dict (见下)
+ *      条目和本插件的其它条目一起上线 (publish 门闸), 卸载时一起摘掉。
+ *    所以插件不需要任何新工厂、也不需要 JSON 解析器 —— 直接 acquire:
+ *
+ *      void* p = NULL; uint32_t g = 0;
+ *      if (mdpsr_acquire(host, mdpsr_hash64("my.cfg"), 0, &p, &g) == MDPSR_OK) {
+ *          const mdpsr_static_dict* d = (const mdpsr_static_dict*)p;
+ *          const mdpsr_static_item* it = mdpsr_static_find(d, mdpsr_hash64("scale"));
+ *          ...
+ *      }
+ *
+ *  ★ 因为它是注册表里的 STATE 条目, 所以【可以在运行时改】: 借到手就能写
+ *    (内核只管锁和生命周期, 不管内容)。改的时候注意 len 要跟着变。
+ *
+ *  ★ text 是 UTF-8 字节流, 【不保证 NUL 结尾】—— 一律按 len 读, 别当 C 字符串用。
+ *    配置里写中文等多字节内容时, 存的就是它的 UTF-8 编码; 要当字符串用就按
+ *    len 转成 std::string(本身即 UTF-8), 不要假定单字节。
+ *    text 恒非空 (空值指向一个空字节), 所以判空只看 len, 不必先判 text。
+ *
+ *  ★ 值必须是【字符串】。写成数字/对象/数组会在装载时直接报 BAD_CONFIG ——
+ *    宁可报错也不替你猜 ("2" 和 2 到底想表达什么, 只有插件自己知道)。
+ * ==========================================================================*/
+typedef struct mdpsr_static_item {
+    uint64_t       key;      /* mdpsr_hash64(次级名称) */
+    const uint8_t* text;     /* UTF-8 字节流, 不保证 NUL 结尾, 恒非空 */
+    uint32_t       len;      /* 字节数 (不是字符数!) */
+    uint32_t       reserved;
+} mdpsr_static_item;
+
+/* 登记进注册表的静态配置条目载荷 —— acquire(初级名称) 拿到的就是它。
+ * 用 magic 自证一下拿到的确实是字典而不是别的 STATE (借错东西时不至于乱读)。 */
+#define MDPSR_STATIC_MAGIC 0x4D535444u   /* 'MSTD' */
+
+typedef struct mdpsr_static_dict {
+    uint32_t                 magic;   /* MDPSR_STATIC_MAGIC */
+    uint32_t                 count;   /* items 的项数 */
+    const mdpsr_static_item* items;   /* count == 0 时为 NULL */
+    const char*              name;    /* 初级名称 (NUL 结尾, 只为日志方便) */
+} mdpsr_static_dict;
+
+/* 按 次级名称哈希 查一项; 找不到返回 NULL。 */
+static inline const mdpsr_static_item* mdpsr_static_find(const mdpsr_static_dict* d,
+                                                         uint64_t key) {
+    if (!d || d->magic != MDPSR_STATIC_MAGIC || !d->items) return NULL;
+    for (uint32_t i = 0; i < d->count; ++i) {
+        if (d->items[i].key == key) return &d->items[i];
+    }
+    return NULL;
+}
+
+/* ==========================================================================
  *  工厂上下文 —— 清单里声明的东西原样交给工厂
  * ==========================================================================*/
 typedef struct mdpsr_factory_ctx {

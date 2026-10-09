@@ -36,6 +36,9 @@ public:
 
     const Json& operator[](const char* key) const;
     const std::vector<Json>& elements() const { return _arr; }
+    /* 对象的成员列表 (键, 值); 不是对象时为空。
+     * 遍历 "Static_State" 这种"键是数据、不是固定字段"的对象要用它。 */
+    const std::vector<std::pair<std::string, Json>>& members() const { return _obj; }
     size_t size() const {
         if (_t == ARR) return _arr.size();
         if (_t == OBJ) return _obj.size();

@@ -13,9 +13,20 @@
 
 namespace mdpsr {
 
+/* "Static_State" 的内核侧上限 (纯宿主策略, 不污染 ABI) */
+#define MDPSR_STATIC_MAX      16u
+#define MDPSR_STATIC_ITEM_MAX 32u
+
 /* 清单里的一个"标签"条目: name 是条目名, 导出符号名由它推出来。 */
 struct TagEntry {
     std::string name;
+};
+
+/* "Static_State" 里的一组: 初级名称 -> 一串 (次级名称, 字符串)。
+ * 这一层只负责"把清单读成数据"; 编成哈希对 + 登记进注册表是 PluginRecord 的活。 */
+struct StaticGroup {
+    std::string                                      entry;   /* 初级名称 */
+    std::vector<std::pair<std::string, std::string>> kv;      /* 次级名称 -> 字符串 */
 };
 
 /* 一个插件的清单 */
@@ -31,6 +42,7 @@ struct Manifest {
     std::vector<TagEntry>    handles;
     std::vector<TagEntry>    queues;
     std::vector<std::string> list;   /* "list": 给工厂的附加参数 */
+    std::vector<StaticGroup> static_state;  /* "Static_State": 按条目名分组的静态配置 */
 
     bool has_handle(const std::string& n) const {
         for (const auto& e : handles) if (e.name == n) return true;
@@ -76,6 +88,26 @@ struct PluginRecord {
     char               list_buf[MDPSR_LIST_MAX][MDPSR_NAME_MAX];
     const char*        list_ptr[MDPSR_LIST_MAX];
     mdpsr_factory_ctx  fctx{};
+
+    /* ---- "Static_State": 宿主在装载时登记成注册表条目 ----
+     *
+     *  ★ 这个特性整个是宿主侧的: 装载插件时顺便做, 卸载时随 rec->entries
+     *    一起摘掉 (不再有"递给工厂"这回事)。
+     *
+     *  texts 先 resize 建满、items 再指过去; 之后本 vector 不再 push,
+     *  所以 &static_dicts[i]、d.name.c_str()、items.data()、texts[j].data()
+     *  的地址一辈子不变 —— Entry::ptr 指着它们是安全的。 */
+    struct StaticDict {
+        uint64_t                          key = 0;    /* mdpsr_hash64(初级名称) */
+        std::string                       name;       /* 初级名称 */
+        std::vector<std::vector<uint8_t>> texts;      /* 字节流本体 (常驻) */
+        std::vector<mdpsr_static_item>    items;      /* text 指向 texts[i] */
+        mdpsr_static_dict                 dict{};     /* ★ 登记进注册表的载荷 */
+    };
+    std::vector<StaticDict> static_dicts;
+
+    /* 把 m.static_state 编成 static_dicts。装载时调一次, 建完就不再动。 */
+    void build_static_dicts();
 
     bool ready() const { return status.load(std::memory_order_acquire) == MDPSR_PLUGIN_READY; }
 
