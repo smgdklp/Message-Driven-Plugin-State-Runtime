@@ -1,0 +1,118 @@
+Pool_msg
+synchronized_pool_resource，负责消息字节流的内存分配
+
+Pool_map
+synchronized_pool_resource，负责 Map 内部节点和引用计数指针的分配
+
+Pool_dll
+unordered_map<uint64_t, unique_ptr<synchronized_pool_resource>>
+以 DLL 的哈希值为键，每个 DLL 一个独立池，DLL 卸载时整池释放
+
+Pool_state
+全局公共可变长资源，unsynchronized_pool_resource
+负责跨 DLL 共享的 State 和可变长 cache
+
+一,基础
+越约定互斥指针Ptr结构体对象
+{
+    void* ptr;
+    int R_count:
+    int W_count:
+    bool valid:
+    mtx
+}规范,valid为false直接当作nuulptr,都不能进入读写,有写不能读,有读不能写,阻塞还是消息回调自己抉择
+
+文中默认名称转对象都是统一哈希uint64_t
+
+Pool_map,Pool_dll,Pool_state,Pool_msg,Pool_thread
+
+MainMap类对象维护一张大表uint64_t:Ptr
+{object:
+,state,handle,queue}一般按需求拆出二级字典指针传入
+向Pool_map*申请内存来存储ptr
+
+
+
+Message字节流规范,以字节流传输,强类型或者直接读写字节
+{
+    uint64_t _handle;
+    int _cmd;
+    int _len;
+    byte字节串
+}
+
+Queue类对象,持有Pool_msg*,MainMap.object,state,handle,queue*,在里面维护一段字节流管道动态扩展内存,Pool_msg*索要内存
+每个Queue对象持有一条线程
+按照message规范,当字节满单条message触发一次,检查队列余量
+然后get该条message,message;Context传给目标handle,等待handle在当前线程执行完
+内置计时器限速!!!!!防止有天才拿来当while
+
+Context规范,上下文结构体对象,提供字典指针,不提供的对象的指针直接为空,目前默认所有都提供
+{
+object:
+,state,handle,queue
+}
+
+命名规范
+Queue类采用Queue_(功能名称)
+Handle函数,(插件名称)_Handle_(次级名字)
+State对象,(插件名称)_State_(次级名字)
+Object类,(插件名称)_类名称
+
+二,核心
+core_Handle_Mgr(Handle)无状态函数,只当接口函数
+core_Mgr,handle下游对象,负责全局对象的删除和添加,所有对象的生命周期严格被Map记录和跟踪
+字节消息解析为uint64_t _plugin,string _path
+cmd=0,初始化,
+在State注册新的plugin_resource:字典uint64_t:[(插件包含的所有资源在Map的ptr)]
+
+解析_path的config.json
+{"plugin":[(plugin.json列表)]}
+
+cmd=1,加载单个插件解析_path的plugin.json
+
+cmd=2,卸载_plugin,如果资源没释放,把此份消息回滚到Queue_pluginmgr
+
+
+
+初始化
+Pool_map,Pool_dll,Pool_state,Pool_msg,Pool_thread
+new MainMap,注入Pool_map*内存依赖
+MainMap.handle注册"Handle_core":Handle_core
+new
+然后new三个Queue注入map
+Queue_pluginmgr#核心组件的线程
+Queue_#给所有组件提供的默认队列
+Queue_windowsgui#
+
+在Queue_pluginmgr注入初始化消息
+主线程完成初始化,放Queue_windowsgui在主线程,保证GUI在主线程
+
+
+
+
+
+二,插件规范
+plugin.json,加载入口配置
+{
+"name":插件名字
+"dll_path":[(相对于该配置路径的所有dll相对路径)]
+"State":[(注册到Pool_state的公有对象的函数标签列表)]
+"Object":[(注册到Pool_object的不公开对象的函数标签列表)]
+"Handle":[(挂载到Map的无状态函数标签列表)]
+"Queue":[(所需要的队列的名称)]
+"Init":初始化指令入口Handle的名称
+
+(余下都是dll自身需要的固定配置的)
+}
+
+函数均采用C风格
+
+State类型函数,只能是数值对象,可变长或者公开作用,接收Pool_state池片段,返回创立对象的指针
+
+Object类型函数,类对象,接收Pool_object池片段,返回创立对象的指针
+
+Handle无状态函数,接口规范为(字节串,Context),建议在此处完成cmd的分流
+Init:指定的handle,必须包含一个cmd=0的初始化函数,用来激活插件工作
+
+
