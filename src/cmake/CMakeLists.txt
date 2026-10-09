@@ -15,6 +15,13 @@ endif()
 
 get_filename_component(MDPSR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 
+# 产物根目录: 由根 CMakeLists 统一设定 (BUILD 变量)。
+# 单独编某个插件时没人设, 就在这儿兜底成 <根>/build —— 反正绝不能拿
+# CMAKE_BINARY_DIR 当基准, 那是各自的 build 树, 会把 plugins/ 套娃。
+if(NOT MDPSR_OUT)
+    set(MDPSR_OUT "${MDPSR_ROOT}/build" CACHE PATH "编译产物根目录 (dll 落在这里的 plugins/ 下)")
+endif()
+
 add_library(mdpsr_common INTERFACE)
 
 target_include_directories(mdpsr_common INTERFACE

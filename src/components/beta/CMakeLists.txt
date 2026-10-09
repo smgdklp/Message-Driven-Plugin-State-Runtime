@@ -16,9 +16,9 @@ set_target_properties(mdpsr_beta PROPERTIES PREFIX "" OUTPUT_NAME "mdpsr_beta")
 
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set_target_properties(mdpsr_beta PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/beta"
-        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/beta"
-        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/beta")
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/beta"
+        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/beta"
+        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/beta")
 endforeach()
 
 add_custom_command(TARGET mdpsr_beta POST_BUILD

@@ -16,9 +16,9 @@ set_target_properties(mdpsr_paint PROPERTIES PREFIX "" OUTPUT_NAME "mdpsr_paint"
 
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set_target_properties(mdpsr_paint PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/paint"
-        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/paint"
-        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/paint")
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/paint"
+        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/paint"
+        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/paint")
 endforeach()
 
 add_custom_command(TARGET mdpsr_paint POST_BUILD

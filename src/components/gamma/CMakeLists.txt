@@ -16,9 +16,9 @@ set_target_properties(mdpsr_gamma PROPERTIES PREFIX "" OUTPUT_NAME "mdpsr_gamma"
 
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set_target_properties(mdpsr_gamma PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/gamma"
-        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/gamma"
-        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/gamma")
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/gamma"
+        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/gamma"
+        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/gamma")
 endforeach()
 
 add_custom_command(TARGET mdpsr_gamma POST_BUILD

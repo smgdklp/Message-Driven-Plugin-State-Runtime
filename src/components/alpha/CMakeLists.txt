@@ -18,9 +18,9 @@ set_target_properties(mdpsr_alpha PROPERTIES PREFIX "" OUTPUT_NAME "mdpsr_alpha"
 # 这样 dll 和 plugin.json 永远躺在同一个目录里 (dll_path 是相对清单目录的)。
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set_target_properties(mdpsr_alpha PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/alpha"
-        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/alpha"
-        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/alpha")
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/alpha"
+        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/alpha"
+        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/alpha")
 endforeach()
 
 add_custom_command(TARGET mdpsr_alpha POST_BUILD

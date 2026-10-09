@@ -17,9 +17,9 @@ set_target_properties(mdpsr_circ_b PROPERTIES PREFIX "" OUTPUT_NAME "mdpsr_circ_
 
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set_target_properties(mdpsr_circ_b PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/circ_b"
-        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/circ_b"
-        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/circ_b")
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/circ_b"
+        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/circ_b"
+        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/circ_b")
 endforeach()
 
 add_custom_command(TARGET mdpsr_circ_b POST_BUILD

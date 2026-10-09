@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 #  winmsg —— GUI broker (框架里唯一碰 Win32 的组件)
 # ============================================================================
 cmake_minimum_required(VERSION 3.20)
@@ -16,9 +16,9 @@ set_target_properties(mdpsr_winmsg PROPERTIES PREFIX "" OUTPUT_NAME "mdpsr_winms
 
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set_target_properties(mdpsr_winmsg PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/winmsg"
-        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/winmsg"
-        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CMAKE_BINARY_DIR}/plugins/winmsg")
+        RUNTIME_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/winmsg"
+        LIBRARY_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/winmsg"
+        ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${MDPSR_OUT}/plugins/winmsg")
 endforeach()
 
 add_custom_command(TARGET mdpsr_winmsg POST_BUILD

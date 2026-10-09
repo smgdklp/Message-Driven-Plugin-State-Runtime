@@ -394,7 +394,25 @@ MDPSR_EXPORT int mdpsr_handle_myplugin_Tick(const mdpsr_msg* msg, const uint8_t*
 
 ## 九、自测验什么
 
+### 怎么编出能跑 GUI 自测的那一套（`Mode=TXST1`）
+
+GUI 自测要 `winmsg`（broker）+ `paint` + `test/` 里的 `circ_a`/`circ_b`/`circ_c`，
+`TXST1` 这个 `Mode` 就是照着这个夹具要求推出来的：
+
+```powershell
+cmake -S . -B build_TXST1 -G "Visual Studio 18 2026" -A x64 -DMode=TXST1 -DBUILD="$PWD\build_TXST1"
+cmake --build build_TXST1 --config Release --parallel
+```
+
+生成的 `build_TXST1\config.json` 恰好是 `sysmgr / winmsg / paint / circ_a / circ_b / circ_c`
+六个 —— **顺序由根 CMakeLists 沿用 `src/main/config.json` 那份基准清单**（`winmsg` 必须
+排在 GUI 客户端前面）。所以 `winmsg` 是 TXST1 场景的一部分，不是可选项。
+
 ### `--guitest`（几秒钟，改 GUI 的时候用）
+
+```powershell
+build_TXST1\mdpsr.exe --guitest
+```
 
 只跑 GUI 阶段，四扇窗（`paint` + `circ_a/b/c`）都在。**122 条断言**，全过退出码 0：
 
@@ -416,11 +434,15 @@ MDPSR_EXPORT int mdpsr_handle_myplugin_Tick(const mdpsr_msg* msg, const uint8_t*
 先跑热插拔压力测试（4 条捣乱线程 + 真装卸 N 轮，见 README 第八节），最后接上面的 GUI 阶段。
 `--cycles 1000` 大约 30 秒，退出码 0/3。
 
+> 它需要**全部九个插件**（`sysmgr` + 组件 + 测试夹具）：热插拔阶段要 `alpha`/`beta`/`gamma`，
+> GUI 阶段要 `circ_a/b/c` + `winmsg`/`paint`。所以 `TXST2`（只有组件）下跑不完整 ——
+> 只改 GUI 的话用 `--guitest` 就够了。
+
 手动看：
 
 ```powershell
-build\mdpsr.exe --duration 8000      # 屏幕上出现 4 扇透明窗口, 里面各有一个纯色圆在动
-Get-Process mdpsr | Select MainWindowTitle   # 4 扇窗的标题都是 "winmsg: paints=N"
+build_TXST1\mdpsr.exe --duration 8000      # 屏幕上出现 4 扇透明窗口, 里面各有一个纯色圆在动
+Get-Process mdpsr | Select MainWindowTitle # 4 扇窗的标题都是 "winmsg: paints=N"
 ```
 
 窗口是透明的：**圆外直接看到桌面**；`circ_b` 那扇开了整窗可拖（拖得动）、`paint` 支持方向键挪窗、

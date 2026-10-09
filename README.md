@@ -8,14 +8,70 @@
 **消息驱动 + 状态托管 + 热插拔插件**的项目框架,附带简单GUI插件范例
 
 宿主 `mdpsr.exe` 只做四件事：**管理一张资源注册表、把字节流按 handle 分发、
-按 plugin.json 装载插件、提供带限速的队列**。业务逻辑全是插件 —— 连"装载/卸载"
-（`sysmgr`）和"GUI"（`winmsg`）都是普通插件，它们用的是宿主给的机制。
+按 plugin.json 装载插件、提供带限速的队列**。业务逻辑全是插件 —— "GUI"（`winmsg`）
+是普通插件，"装载/卸载"（`sysmgr`）虽然也是靠 `plugin.json` 加载的 dll，但它在构建上
+属于**框架的一部分**（住在 `src/main/sysmgr/`，和框架一起编），因为它拿的是内核权限，
+用的是宿主给的机制。
 
 **宿主主线程是"架空"的**：它只负责 `init`/`boot`，然后等退出。需要线程亲和的活
 （建窗口、画图）由插件自己开线程实现 —— 框架不为它保留任何特殊位置。
 
+## 怎么编译
+
+编译入口是**根目录的 `CMakeLists.txt`**（整个项目唯一的入口）。它有三个开关：
+
+| 开关 | 含义 |
+| --- | --- |
+| `BUILD` | **产出文件夹**。所有产物都落在它下面；留空 = `<根>/build` |
+| `PLUGIN_LIST` | **要编译的插件文件夹**（相对根目录的路径）。空则由 `Mode` 决定 |
+| `Mode` | `TXST1` = 框架 + `test/` 里的测试插件 + `winmsg`/`paint`（**GUI 自测场景，唯一能跑通 `--guitest` 的**）<br>`TXST2` = `src/components/` 里的组件（含 wingui/`winmsg`）组合<br>空 = 只编框架 + `sysmgr` |
+
+`PLUGIN_LIST` 不为空时它说了算；为空才用 `Mode` 推导。
+
+> ⚠ **`-B` 和 `BUILD` 是两件事**：`-B` 是 CMake 的二进制树（放 vcxproj/obj），
+> `BUILD` 是**产物文件夹**（放 exe / dll / config.json）。不传 `-DBUILD` 时产物一律
+> 落 `<根>/build` —— 所以你要是用了 `-B build_TXST1`，记得配上
+> `-DBUILD="$PWD\build_TXST1"`，否则两次 configure 会往同一个产物目录里写。
+
 ```powershell
-pwsh -File build.ps1 -Run          # 构建 + 跑热插拔自测 + GUI 阶段 (成功退出码 0)
+# TXST1 —— 能跑通 --guitest 的那个场景
+cmake -S . -B build_TXST1 -G "Visual Studio 18 2026" -A x64 -DMode=TXST1 -DBUILD="$PWD\build_TXST1"
+cmake --build build_TXST1 --config Release --parallel
+.\build_TXST1\mdpsr.exe --guitest     # 退出码 0 = 全部通过
+
+# TXST2 —— 组件 + wingui 的组合场景
+cmake -S . -B build_TXST2 -G "Visual Studio 18 2026" -A x64 -DMode=TXST2 -DBUILD="$PWD\build_TXST2"
+cmake --build build_TXST2 --config Release --parallel
+
+# 只编框架 (不要任何插件)
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64
+cmake --build build --config Release --parallel
+```
+
+> ⚠ **两个 Mode 的成熟度不一样。**
+> **能跑通的是 `TXST1`（框架 + wingui）** —— 它编出来的六个插件正好是 GUI 自测的夹具，
+> `--guitest` 122 条断言全过。
+> `TXST2` 是"`src/components/` 里的组件 + wingui 的组合场景"，但其中
+> `alpha` / `beta` / `gamma` 是**历史遗留的演示插件，不保证和当前框架适配**；
+> 而且 `--selftest` 的 GUI 阶段要 `test/` 里的 `circ_*`，TXST2 不含它们，
+> 所以 **`--selftest` 在 TXST2 下跑不完整**。要验框架请用 `TXST1`。
+
+只编某几个插件也行 —— `PLUGIN_LIST` 直接点菜（它不为空时 `Mode` 就不看了）：
+
+```powershell
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64 `
+      -DPLUGIN_LIST="src/components/winmsg;src/components/paint"
+```
+
+> **`build.ps1` 已废弃。** 构建现在是纯 CMake，不再用 ps1 编排；那个脚本还留在仓库里，
+> 但它按老布局检查产物，和新结构已经对不上了，别再用它。
+
+## 怎么跑
+
+下面用默认产出目录 `build` 举例（`cmake ... -B build`）；如果你传了 `-DBUILD=...`，
+把 `build\` 换成你自己的产出目录即可。
+
+```powershell
 build\mdpsr.exe --duration 4000    # 跑 4 秒 (屏幕上出现 4 扇透明窗口, 各有一个纯色圆)
 build\mdpsr.exe --guitest          # 只跑 GUI 阶段 (几秒钟, 122 条断言)
 build\mdpsr.exe --selftest --cycles 1000            # 1000 轮装-卸压力测试 + GUI 阶段
@@ -25,6 +81,36 @@ build\mdpsr.exe --debug --duration 4000             # 连 DBG 级日志一起打
 
 日志等级：默认打 `INFO/WARN/ERR`；`--quiet` 只打 `WARN/ERR`；`--debug` 才打 `DBG`
 （那些"跑起来会刷屏的细节"都放在 DBG 里）。
+
+> **`--selftest` 需要全部插件。** 它除了热插拔阶段，还会跑 GUI 阶段，而 GUI 阶段要
+> `test/` 里的 `circ_a`/`circ_b`/`circ_c`。所以只有把 9 个插件（`sysmgr` + 组件 +
+> 测试夹具）都编出来，`--selftest` 才跑得完整；`TXST1` 场景请用 `--guitest`。
+
+## 解耦结构（框架 / 插件 / 组装）
+
+这份仓库刻意切成两半，中间只靠一份 JSON 约定连接：
+
+| 那一半 | 住在哪 | 谁编它 | 里面有没有对方 |
+| --- | --- | --- | --- |
+| **框架** | `src/main`（`runtime/` + `main.cpp` + `include/mdpsr/abi.h`） | 根 `CMakeLists.txt` 直接加 `src/main` | **没有任何插件路径** |
+| **插件** | `src/components/<名字>/`（组件）、`test/<名字>/`（测试夹具） | 根 `CMakeLists.txt` 按 `PLUGIN_LIST` 逐个独立加 | 只认 `abi.h`，互相只靠名字发消息 |
+| **组装** | `<BUILD>/config.json` | 根 `CMakeLists.txt` **在 configure 阶段生成** | —— |
+
+也就是说：
+
+* **框架不知道有哪些插件存在。** `src/main/CMakeLists.txt` 里已经没有任何
+  `add_subdirectory(../components/...)`，文件里只留了一句注释说明"这里就是以前插件路径
+  待过的地方"。加 / 删 / 换插件完全不用碰框架。
+* **插件是各自独立的工程。** 每个文件夹自带 `CMakeLists.txt` + `plugin.json`，产物进
+  `<BUILD>/plugins/<名字>/`，可以整个目录拷走。
+* **`config.json` 是唯一的组装环节。** 它由根 CMakeLists 按本次**真正编出来的插件集合**
+  生成（顺序沿用 `src/main/config.json` 那份作者写好的基准清单，它体现依赖关系：
+  `sysmgr` 在内核位、`winmsg` 在 GUI 客户端前面）。所以 `Mode` / `PLUGIN_LIST` 换一套，
+  装配清单跟着换一套 —— 不会出现"声明了却没编出来"直接引导失败。
+* **`sysmgr` 是内核，不是可替换插件。** 它住在 `src/main/sysmgr/`，由框架的
+  `CMakeLists.txt` 一起编，**不进 `PLUGIN_LIST`**。产物仍然是一个自包含的
+  `plugins/sysmgr/`（运行时就是靠 `config.json` 点名加载它的），变的是"谁来编它"。
+
 
 
 ---
@@ -129,16 +215,18 @@ uint32_t gen_of(host, key);                           // 无锁快照, 0 = 不�
 ## 三、目录与产物
 
 ```
+CMakeLists.txt                     ★ 整个项目唯一的编译入口 (BUILD / PLUGIN_LIST / Mode)
 src/
-├── main/                          宿主
+├── main/                          框架那一半 (里面没有任何插件路径)
 │   ├── include/mdpsr/abi.h        ★ 唯一的二进制契约 (纯 C99)
 │   ├── runtime/                   registry / queue / runtime / loader / json / host_api
 │   ├── main.cpp                   主程序 (含热插拔压力自测; GUI 阶段在 test/)
-│   ├── CMakeLists.txt             组织整个项目 (含 test/ 的测试插件)
-│   └── config.json                引导清单
-├── components/                    每个组件一个文件夹, 各自能独立编译
+│   ├── sysmgr/                    ★ 内核组件: 有装卸权限, 驱动热插拔
+│   │   └── README.md              和框架一起编, 不进 PLUGIN_LIST
+│   ├── CMakeLists.txt             只产出 mdpsr_runtime / mdpsr.exe / mdpsr_sysmgr
+│   └── config.json                ★ 规范顺序的基准清单 (产物里那份是生成的, 见下)
+├── components/                    插件那一半: 每个组件一个文件夹, 各自独立工程
 │   ├── demo_protocol.h            演示插件之间的协议 (不是框架的一部分)
-│   ├── sysmgr/                    内核组件: 有装卸权限, 驱动热插拔
 │   ├── alpha/                     演示: 自转循环 / 队列限速 / 回包
 │   ├── beta/                      演示: 没声明队列 -> 走默认队列 / 跨插件请求
 │   ├── gamma/                     演示: 多 handle 一条队列 / 运行时自建队列
@@ -147,7 +235,7 @@ src/
 │   │   ├── winmsg_client.h        客户端助手 (纯 C, 不含 Windows 头)
 │   │   └── winmsg.cpp             GUI 线程 / WndProc / 缩放+偏置+贴图 (C++)
 │   └── paint/                     演示: 一个不含任何 Windows 代码的 GUI 客户端
-└── cmake/                         公共编译设置 (mdpsr_common)
+└── cmake/                         公共编译设置 (mdpsr_common, 也在这里兜底 MDPSR_OUT)
 
 test/                              ★ 测试模块 (刻意不进 src: 删掉整个目录, 框架一样跑)
 ├── gui_test_protocol.h            三个测试插件的参数表 + 参考光栅器 (插件与自测共用)
@@ -164,23 +252,41 @@ doc/
 archive/                           旧实现与旧文档
 ```
 
-构建产物（每个插件一个自包含子目录，可以整个拷走）：
+> 每个组件 / 测试夹具的文件夹里都有自己的短 `README.md`（"这是什么 / 有哪些条目 /
+> 看日志找什么"），不用翻源码就能认出它是干嘛的；细节仍然看 `doc/` 下的三份权威文档。
+
+
+构建产物（每个插件一个自包含子目录，可以整个拷走）。下面用 `<BUILD>` 指代你传的产出目录，
+不传就是 `<根>/build`：
 
 ```
-build/
+<BUILD>/
 ├── mdpsr.exe
-├── config.json
-└── plugins/
-    ├── sysmgr/{mdpsr_sysmgr.dll, plugin.json}   ... 以此类推
-    ├── winmsg/ paint/                            (框架自带的组件)
-    └── circ_a/ circ_b/ circ_c/                    (test/ 里的测试插件)
+├── config.json                    ★ 由根 CMakeLists 按本次编出来的插件集合生成
+├── plugins/
+│   ├── sysmgr/{mdpsr_sysmgr.dll, plugin.json}    (内核, 跟框架一起编)
+│   ├── winmsg/ paint/                            (组件)
+│   ├── alpha/ beta/ gamma/                       (组件)
+│   └── circ_a/ circ_b/ circ_c/                    (test/ 里的测试夹具)
+├── _framework/                    CMake 中间树 (框架的 vcxproj/obj, 别删别拷)
+└── _plugins/<名字>/                CMake 中间树 (每个插件各自的 build 树)
 ```
 
-单独编译某个组件也行：
+上面两个 `_` 开头的目录只是 CMake 的**二进制树**（`add_subdirectory` 需要各自的
+binary dir），真正的产物只有 `mdpsr.exe` / `config.json` / `plugins/`。
+这也是为什么插件的产物路径要显式钉成 `${MDPSR_OUT}/plugins/<名字>` ——
+不然它们会顺着各自的 binary dir 落进 `_plugins/alpha/plugins/alpha/`。
+
+产物路径统一走 `MDPSR_OUT`（根 CMakeLists 把它设成 `${BUILD}`，`src/cmake` 里兜底成
+`<根>/build`）。**插件的输出目录绝不能用 `CMAKE_BINARY_DIR`** —— 插件是各自独立
+configure 的独立工程，那样会变成 `build/plugins/alpha/plugins/alpha/` 套娃。
+
+单独编译某个插件也行（每个文件夹都是完整工程，自带 `CMakeLists.txt` + `plugin.json`）：
 
 ```powershell
-cmake -S src/components/alpha -B build/alpha -G "Visual Studio 18 2026" -A x64
-cmake -S test/circ_a          -B build/circ_a  -G "Visual Studio 18 2026" -A x64
+cmake -S src/components/alpha -B build_alpha -G "Visual Studio 18 2026" -A x64
+cmake --build build_alpha --config Release
+# 产物同样落进 <根>/build/plugins/alpha/ (MDPSR_OUT 兜底成 <根>/build)
 ```
 
 ---
@@ -206,8 +312,16 @@ cmake -S test/circ_a          -B build/circ_a  -G "Visual Studio 18 2026" -A x64
 
 `config.json` 的 `plugin` 列表**就是依赖顺序**：前面的先装好，后面的在自己的
 `cmd=0` 里才看得到前面插件的 State。声明了却装不上会**直接判定引导失败**
-（退出码 2），而不是带着半个系统往下跑。默认装九个：`sysmgr / alpha / beta / gamma /
-winmsg / paint / circ_a / circ_b / circ_c`。
+（退出码 2），而不是带着半个系统往下跑。
+
+产物里那份 `<BUILD>/config.json` 是**根 CMakeLists 在 configure 阶段生成**的，内容 =
+本次**真正编出来的**插件集合（`sysmgr` + `PLUGIN_LIST`/`Mode` 推出来的那些）。
+顺序沿用仓库里 `src/main/config.json` 那份基准清单 —— 它是"规范顺序"的唯一出处
+（体现依赖关系：`sysmgr` 在内核位、`winmsg` 在 GUI 客户端前面）；这次没编的跳过，
+编了但基准清单里没有的追加到末尾。`src/main/config.json` 本身保留不动。
+
+全量装九个时就是：`sysmgr / alpha / beta / gamma / winmsg / paint / circ_a / circ_b / circ_c`。
+`TXST1` 下生成的则是 `sysmgr / winmsg / paint / circ_a / circ_b / circ_c`。
 
 ---
 
@@ -268,8 +382,9 @@ winmsg / paint / circ_a / circ_b / circ_c`。
 
 ## 七、演示插件在演示什么
 
-`config.json` 默认装 `sysmgr / alpha / beta / gamma / winmsg / paint` 六个框架自带的，
-外加 `test/` 里的三个 GUI 测试客户端。
+装哪些是由生成的 `<BUILD>/config.json` 决定的：`sysmgr`（内核，跟着框架编）+
+`src/components/` 里的组件 + `test/` 里的三个 GUI 测试客户端。全量九个就是
+`sysmgr / alpha / beta / gamma / winmsg / paint / circ_a / circ_b / circ_c`。
 
 | 插件 | 演示的机制 |
 | --- | --- |
@@ -368,18 +483,21 @@ build\mdpsr.exe --guitest        # 几秒钟, 122 条断言, 成功退出码 0
 方向键挪窗、空格暂停刷新；`Alt+F4` 关闭；`circ_a`/`circ_c` 收到点击会自己关窗再自己开回来。
 
 同一份代码在 **AddressSanitizer** 下跑也是干净的（无 ASan 报告）。本轮改动后用
-`--cycles 200` + GUI 阶段复验过一次：
+`--cycles 200` + GUI 阶段复验过一次。ASan 是 CMake 开关 `MDPSR_ASAN`：
 
 ```powershell
-pwsh -File build.ps1 -Asan -Run     # 需要把 clang_rt.asan_dynamic-x86_64.dll 放到 exe 旁边
+cmake -S . -B build_asan -G "Visual Studio 18 2026" -A x64 -DMode=TXST1 -DMDPSR_ASAN=ON
+cmake --build build_asan --config Release --parallel
+# 需要把 clang_rt.asan_dynamic-x86_64.dll 放到 exe 旁边
 ```
 
 > ASan 那个 DLL 在 VS 安装目录里：
 > `<VS>\VC\Tools\MSVC\<版本>\bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll`。
 > 另外别设 `ASAN_OPTIONS=detect_leaks=1` —— 这个平台不支持，进程会直接退出。
-> （`build.ps1` 现在每次都显式传 `-DMDPSR_ASAN=ON/OFF`：这个开关活在 CMake 缓存里，
-> 不显式关掉的话，跑过一次 `-Asan` 之后普通构建会**悄悄继续**用 sanitizer 编，
-> 然后因为没有那个 DLL 而以 `STATUS_DLL_NOT_FOUND` 退出。）
+> **`MDPSR_ASAN` 活在 CMake 缓存里**：跑过一次 `-DMDPSR_ASAN=ON` 之后，不带这个参数
+> 重新 configure 的同一个 build 目录会**悄悄继续**用 sanitizer 编，然后因为没有那个
+> DLL 而以 `STATUS_DLL_NOT_FOUND` 退出。换配置请显式传 `-DMDPSR_ASAN=OFF`，或者干脆
+> 用另一个 `-B` 目录。
 
 ### 卡住的时候用什么
 
