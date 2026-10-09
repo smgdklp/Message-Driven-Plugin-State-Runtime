@@ -1,54 +1,177 @@
-# Message-Driven Plugin State Runtime (mdpsr) — ABI v3 / winmsg 协议 v2
+# mdpsr 快速上手
 
-释怀了,完全托管给DSH重构了dll装卸部分,还是感叹如果不用ai可能一学期都做不完..........
+> 这是什么项目 / 架构 / 演示插件 / 已知边界 → **[doc/总览.md](doc/总览.md)**
+> 框架内部（锁序、生命周期、为什么不会死锁）→ [doc/架构.md](doc/架构.md)
+> 插件怎么写（字段表、四类导出、借还协议、线程模型）→ [doc/插件规范.md](doc/插件规范.md)
+> GUI 与 winmsg 的唯一权威文档 → [doc/GUI.md](doc/GUI.md)
 
-(但是这家伙怎么能把我破烂的表达能力完美复刻到文档的....)
+---
 
+## 1. 插件快速说明：`plugin.json` 与它对应的导出
 
-**消息驱动 + 状态托管 + 热插拔插件**的项目框架,附带简单GUI插件范例
+最小可编译的清单：
 
-宿主 `mdpsr.exe` 只做四件事：**管理一张资源注册表、把字节流按 handle 分发、
-按 plugin.json 装载插件、提供带限速的队列**。业务逻辑全是插件 —— "GUI"（`winmsg`）
-是普通插件，"装载/卸载"（`sysmgr`）虽然也是靠 `plugin.json` 加载的 dll，但它在构建上
-属于**框架的一部分**（住在 `src/main/sysmgr/`，和框架一起编），因为它拿的是内核权限，
-用的是宿主给的机制。
+```jsonc
+{
+  "name":     "hello",                  // 插件名, 全局唯一
+  "dll_path": "mdpsr_hello.dll",        // 相对本清单所在目录; 也可以是数组
 
-**宿主主线程是"架空"的**：它只负责 `init`/`boot`，然后等退出。需要线程亲和的活
-（建窗口、画图）由插件自己开线程实现 —— 框架不为它保留任何特殊位置。
+  "State":    ["hello.Count"],          // 公用数据 -> mdpsr_state_hello_Count
+  "Object":   ["hello.Keeper"],         // 私有的类 -> mdpsr_object_hello_Keeper
+  "Handle":   ["hello.Handle"],         // 消息入口 -> mdpsr_handle_hello_Handle
+  "Queue":    ["Queue_hello"],          // 可选, 省了就落 Queue_default
+  "Init":     "hello.Handle",           // 可选: 谁的 cmd=0 是初始化入口
+  "list":     ["demo", "paced"]         // 可选: 给工厂的附加字符串数组
+}
+```
 
-## 怎么编译
+**每一段对应哪个 C++ 导出：**
 
-编译入口是**根目录的 `CMakeLists.txt`**（整个项目唯一的入口）。它有三个开关：
+| 段 | 是什么 | 对应的导出（`<条目名>` 里的 `.` 变 `_`） |
+| --- | --- | --- |
+| `name` | 插件名，全局唯一，≤ 63 字节 | —— |
+| `dll_path` | 相对**本清单所在目录**的 dll；字符串或字符串数组 | —— |
+| `State` | **公用数据对象**。跨插件共享的就是它 | `void* mdpsr_state_<条目名>(const mdpsr_factory_ctx*)`<br>可选 `void mdpsr_state_<条目名>_destroy(void*, const mdpsr_factory_ctx*)` |
+| `Object` | **私有的类实例**（别人 `acquire` 会拿到 `NO_PERM`） | `void* mdpsr_object_<条目名>(const mdpsr_factory_ctx*)`<br>可选 `void mdpsr_object_<条目名>_destroy(void*, const mdpsr_factory_ctx*)` |
+| `Handle` | **无状态消息入口**，至少一个 | `int mdpsr_handle_<条目名>(const mdpsr_msg*, const uint8_t* body, uint32_t body_len, const mdpsr_ctx*)` |
+| `Queue` | 声明自己要用（或要建）的**分流队列**；省略 = 用宿主的 `Queue_default` | `int mdpsr_queue_<队列名>(const mdpsr_factory_ctx*, mdpsr_queue_desc*)`<br>只回答 `capacity` / `pace_ms`；找不到这个导出就退回默认参数 |
+| `Init` | **谁的 `cmd=0` 是初始化入口**；必须在 `Handle` 里声明过 | —— |
+| `kernel` | `true` 才有装卸别的插件的权限（默认 `false`） | —— |
+| `list` | 给工厂的附加字符串数组 | 工厂里从 `ctx->list` / `ctx->list_count` 取 |
+
+**模块本身必须导出三个：**
+
+| 导出 | 必需 | 说明 |
+| --- | --- | --- |
+| `uint32_t mdpsr_abi_version(void)` | ✔ | 写 `MDPSR_DECL_ABI_VERSION()` 宏即可；装载时核对，对不上就拒绝 |
+| `int mdpsr_module_init(const mdpsr_factory_ctx*)` | ✔ | dll 装载后调一次 |
+| `void mdpsr_module_fini(void)` | | 可选 |
+
+工厂一律从 `ctx->pool`（= 本插件专属池）分配，别用 `new`/`malloc` —— 卸载时整池回收；
+`State`/`Object` 的 `_destroy` 里只做析构（`p->~T()`），不要自己 `free`。
+
+**命令行约定：命令号在帧头里，不在 body 里。** `mdpsr_handle_fn` 拿到的是
+`msg` + `body`，判命令**只读 `msg->cmd`**（帧头偏移 16）；body 里的参数"长度够才读"。
+
+| `msg->cmd` | 含义 |
+| --- | --- |
+| `MDPSR_CMD_INIT`（**0**） | **初始化，约等于别的框架里的 Main**。清单里 `Init` 指的那个 handle 会在装载完成后收到它 |
+| `1..15` | 框架保留（`REPLY` / `FAIL` / `PING` / `PONG` / `STOP`），礼貌处理，别回 `UNKNOWN_CMD` |
+| `MDPSR_CMD_USER_BASE`（**16**）起 | 插件自己的命令 |
+
+没有"主线"的组件（比如纯窗口类）把 `cmd=0` 空着、直接返回 `MDPSR_OK` 就行。
+
+---
+
+## 2. 命名规范
+
+### 队列名：`Queue_<名字>`
+
+框架固定两条：**`Queue_sys`**（内核/管理，装卸都在这条上跑）、**`Queue_default`**（默认队列）。
+插件自己的：`Queue_alpha`、`Queue_paint`、`Queue_circ_a`、`Queue_gamma` …
+
+### 其余条目名：`<插件名>.<条目名>`
+
+例：`alpha.Handle`、`alpha.Stats`、`alpha.Keeper`、`sysmgr.Status`、`sysmgr.Mgr`、
+`winmsg.Screen`、`winmsg.Shelf`、`winmsg.Control`、`paint.Surface`、`paint.Handle`、
+`paint.Events`、`gamma.Ledger`、`gamma.Machine`、`gamma.Handle_Work`、
+`gamma.Handle_Report`、`beta.Counter`、`circ_a.Surface`、`circ_a.Tick`、`circ_a.Events`。
+
+`<条目名>` 按类型的习惯取：
+
+| 类型 | 习惯 | 实例 |
+| --- | --- | --- |
+| `State` | 名词，**它是什么** | `Stats` `Status` `Screen` `Surface` `Ledger` `Counter` |
+| `Object` | 名词，**干活的那个东西** | `Keeper` `Mgr` `Shelf` `Machine` |
+| `Handle` | 控制/事件性动词或名词 | `Handle` `Control` `Events` `Tick` `Handle_Work` `Handle_Report` |
+
+### 导出符号：`mdpsr_<种类>_<条目名>`
+
+**条目名里不是 `[A-Za-z0-9_]` 的字符统一变成 `_`。**
+
+| 条目名 | 种类 | 导出符号 |
+| --- | --- | --- |
+| `alpha.Stats` | State | `mdpsr_state_alpha_Stats` |
+| `alpha.Keeper` | Object | `mdpsr_object_alpha_Keeper` + `mdpsr_object_alpha_Keeper_destroy` |
+| `alpha.Handle` | Handle | `mdpsr_handle_alpha_Handle` |
+| `Queue_alpha` | Queue | `mdpsr_queue_Queue_alpha` |
+
+`sysmgr` 是内核组件，它的 `sysmgr.Status` / `sysmgr.Mgr` / `sysmgr.Handle` 规则完全一样，
+只是它住在 `src/main/sysmgr/`、和框架一起编（**别拿它当插件模板**）。
+
+⚠ 三条硬规则（**装载时会真的检查，违反就装不上**）：
+
+1. 条目名在**全进程**唯一（两个插件不能都叫 `Config`）；
+2. 同一个清单里不能重名；
+3. 两个不同的条目名**去掉符号之后不能撞**（`A.B` 和 `A_B` 会推出同一个符号 → 拒绝）。
+
+---
+
+## 3. 编译快速说明
+
+### 主入口：根目录的 `CMakeLists.txt`
+
+**就是它编排一切** —— 加插件、换组合、改产出目录都在这里。
 
 | 开关 | 含义 |
 | --- | --- |
-| `BUILD` | **产出文件夹**。所有产物都落在它下面；留空 = `<根>/build` |
-| `PLUGIN_LIST` | **要编译的插件文件夹**（相对根目录的路径）。空则由 `Mode` 决定 |
-| `Mode` | `TXST1` = 框架 + `test/` 里的测试插件 + `winmsg`/`paint`（**GUI 自测场景，唯一能跑通 `--guitest` 的**）<br>`TXST2` = `src/components/` 里的组件（含 wingui/`winmsg`）组合<br>空 = 只编框架 + `sysmgr` |
+| `BUILD` | **产出文件夹**。所有产物都落在它下面；空 = `<根>/build` |
+| `PLUGIN_LIST` | **要编译的插件文件夹**（相对根目录的路径，分号分隔）。空则由 `Mode` 决定 |
+| `Mode` | `TXST1` = 框架 + `test/` 测试插件 + `winmsg`/`paint` —— **唯一能跑通 `--guitest` 的**<br>`TXST2` = `src/components/` 里的组件（含 wingui/`winmsg`）<br>空 = 只编框架 + `sysmgr` |
 
 `PLUGIN_LIST` 不为空时它说了算；为空才用 `Mode` 推导。
 
-> ⚠ **`-B` 和 `BUILD` 是两件事**：`-B` 是 CMake 的二进制树（放 vcxproj/obj），
-> `BUILD` 是**产物文件夹**（放 exe / dll / config.json）。不传 `-DBUILD` 时产物一律
-> 落 `<根>/build` —— 所以你要是用了 `-B build_TXST1`，记得配上
-> `-DBUILD="$PWD\build_TXST1"`，否则两次 configure 会往同一个产物目录里写。
+### 怎么添加一个新的编译组合
+
+1. **建插件文件夹**：`src/components/<名字>/`，放三样东西 —— `plugin.json` + 一个 `.cpp`
+   + `CMakeLists.txt`（照抄 `src/components/alpha/`，最简）。
+2. **让它被编出来**，二选一：
+   * **点名**：configure 时 `-DPLUGIN_LIST="src/components/<名字>"`
+   * **或加一条 `Mode` 分支**：在根 `CMakeLists.txt` 的
+     `if(NOT _plugins) … elseif(_mode STREQUAL "TXST1") … elseif(_mode STREQUAL "TXST2") …
+     elseif(_mode STREQUAL "") … else() FATAL_ERROR …` 这条链里，
+     **在 `elseif(_mode STREQUAL "")` 之前**插一段
+     `elseif(_mode STREQUAL "TXST3")`，在里面 `file(GLOB …)` + `list(APPEND _plugins …)`。
+3. **加进基准清单**：把 `plugins/<名字>/plugin.json` 写进 `src/main/config.json`
+   —— 它决定**加载顺序**（前面的先装好，后面的在 `cmd=0` 里才看得到前面插件的 State）。
+   产物里那份 `<BUILD>/config.json` 是**自动生成**的，不用手改。
+
+### 一条最小可用的完整命令
 
 ```powershell
-# TXST1 —— 能跑通 --guitest 的那个场景
 cmake -S . -B build_TXST1 -G "Visual Studio 18 2026" -A x64 -DMode=TXST1 -DBUILD="$PWD\build_TXST1"
 cmake --build build_TXST1 --config Release --parallel
-.\build_TXST1\mdpsr.exe --guitest     # 退出码 0 = 全部通过
-
-# TXST2 —— 组件 + wingui 的组合场景
-cmake -S . -B build_TXST2 -G "Visual Studio 18 2026" -A x64 -DMode=TXST2 -DBUILD="$PWD\build_TXST2"
-cmake --build build_TXST2 --config Release --parallel
-
-# 只编框架 (不要任何插件)
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64
-cmake --build build --config Release --parallel
 ```
 
-> ⚠ **两个 Mode 的成熟度不一样。**
+> ⚠ **`-B` 和 `BUILD` 是两件事**：`-B` 是 CMake 的**二进制树**（放 vcxproj/obj），
+> `BUILD` 是**产物文件夹**（放 exe / dll / config.json）。不传 `-DBUILD` 时产物一律落
+> `<根>/build` —— 所以用了 `-B build_TXST1` 就记得配上 `-DBUILD="$PWD\build_TXST1"`，
+> 否则两次 configure 会往同一个产物目录里写。
+
+### 产物布局
+
+```
+<BUILD>/
+├── mdpsr.exe
+├── config.json                     ★ 生成的: 按本次真正编出来的插件集合
+└── plugins/<名字>/{mdpsr_<名字>.dll, plugin.json}
+```
+
+每个插件都是**自包含的一个子目录，可以整个拷走**。`<BUILD>/_framework/` 和
+`<BUILD>/_plugins/<名字>/` 只是 CMake 的中间树，可以无视。
+
+### 只编某几个插件
+
+`PLUGIN_LIST` 可以直接点菜（它不为空时 `Mode` 就不看了）：
+
+```powershell
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64 `
+      -DPLUGIN_LIST="src/components/winmsg;src/components/paint"
+```
+
+> ⚠ **构建是纯 CMake，不再用 ps1 编排**（原来那个 `build.ps1` 已经删掉了）。
+
+> ⚠ **两个 `Mode` 的成熟度不一样。**
 > **能跑通的是 `TXST1`（框架 + wingui）** —— 它编出来的六个插件正好是 GUI 自测的夹具，
 > `--guitest` 122 条断言全过。
 > `TXST2` 是"`src/components/` 里的组件 + wingui 的组合场景"，但其中
@@ -56,487 +179,40 @@ cmake --build build --config Release --parallel
 > 而且 `--selftest` 的 GUI 阶段要 `test/` 里的 `circ_*`，TXST2 不含它们，
 > 所以 **`--selftest` 在 TXST2 下跑不完整**。要验框架请用 `TXST1`。
 
-只编某几个插件也行 —— `PLUGIN_LIST` 直接点菜（它不为空时 `Mode` 就不看了）：
+---
+
+## 4. 怎么跑
+
+下面用默认产出目录 `build` 举例；传了 `-DBUILD=...` 就换成你自己的目录。
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64 `
-      -DPLUGIN_LIST="src/components/winmsg;src/components/paint"
+build\mdpsr.exe --duration 4000                    # 跑 4 秒 (屏幕上出现 4 扇透明窗口, 各一个纯色圆)
+build\mdpsr.exe --guitest                          # 只跑 GUI 阶段 (几秒钟, 122 条断言)
+build\mdpsr.exe --selftest --cycles 1000           # 1000 轮装-卸压力测试 + GUI 阶段
+build\mdpsr.exe --watchdog 3000 --duration 20000   # 边跑边看"谁握着什么锁"
+build\mdpsr.exe --debug --duration 4000            # 连 DBG 级日志一起打
 ```
 
-> **`build.ps1` 已废弃。** 构建现在是纯 CMake，不再用 ps1 编排；那个脚本还留在仓库里，
-> 但它按老布局检查产物，和新结构已经对不上了，别再用它。
+全部参数（来自 `src/main/main.cpp`）：
 
-## 怎么跑
-
-下面用默认产出目录 `build` 举例（`cmake ... -B build`）；如果你传了 `-DBUILD=...`，
-把 `build\` 换成你自己的产出目录即可。
-
-```powershell
-build\mdpsr.exe --duration 4000    # 跑 4 秒 (屏幕上出现 4 扇透明窗口, 各有一个纯色圆)
-build\mdpsr.exe --guitest          # 只跑 GUI 阶段 (几秒钟, 122 条断言)
-build\mdpsr.exe --selftest --cycles 1000            # 1000 轮装-卸压力测试 + GUI 阶段
-build\mdpsr.exe --watchdog 3000 --duration 20000    # 边跑边看"谁握着什么锁"
-build\mdpsr.exe --debug --duration 4000             # 连 DBG 级日志一起打
-```
-
-日志等级：默认打 `INFO/WARN/ERR`；`--quiet` 只打 `WARN/ERR`；`--debug` 才打 `DBG`
-（那些"跑起来会刷屏的细节"都放在 DBG 里）。
-
-> **`--selftest` 需要全部插件。** 它除了热插拔阶段，还会跑 GUI 阶段，而 GUI 阶段要
-> `test/` 里的 `circ_a`/`circ_b`/`circ_c`。所以只有把 9 个插件（`sysmgr` + 组件 +
-> 测试夹具）都编出来，`--selftest` 才跑得完整；`TXST1` 场景请用 `--guitest`。
-
-## 解耦结构（框架 / 插件 / 组装）
-
-这份仓库刻意切成两半，中间只靠一份 JSON 约定连接：
-
-| 那一半 | 住在哪 | 谁编它 | 里面有没有对方 |
-| --- | --- | --- | --- |
-| **框架** | `src/main`（`runtime/` + `main.cpp` + `include/mdpsr/abi.h`） | 根 `CMakeLists.txt` 直接加 `src/main` | **没有任何插件路径** |
-| **插件** | `src/components/<名字>/`（组件）、`test/<名字>/`（测试夹具） | 根 `CMakeLists.txt` 按 `PLUGIN_LIST` 逐个独立加 | 只认 `abi.h`，互相只靠名字发消息 |
-| **组装** | `<BUILD>/config.json` | 根 `CMakeLists.txt` **在 configure 阶段生成** | —— |
-
-也就是说：
-
-* **框架不知道有哪些插件存在。** `src/main/CMakeLists.txt` 里已经没有任何
-  `add_subdirectory(../components/...)`，文件里只留了一句注释说明"这里就是以前插件路径
-  待过的地方"。加 / 删 / 换插件完全不用碰框架。
-* **插件是各自独立的工程。** 每个文件夹自带 `CMakeLists.txt` + `plugin.json`，产物进
-  `<BUILD>/plugins/<名字>/`，可以整个目录拷走。
-* **`config.json` 是唯一的组装环节。** 它由根 CMakeLists 按本次**真正编出来的插件集合**
-  生成（顺序沿用 `src/main/config.json` 那份作者写好的基准清单，它体现依赖关系：
-  `sysmgr` 在内核位、`winmsg` 在 GUI 客户端前面）。所以 `Mode` / `PLUGIN_LIST` 换一套，
-  装配清单跟着换一套 —— 不会出现"声明了却没编出来"直接引导失败。
-* **`sysmgr` 是内核，不是可替换插件。** 它住在 `src/main/sysmgr/`，由框架的
-  `CMakeLists.txt` 一起编，**不进 `PLUGIN_LIST`**。产物仍然是一个自包含的
-  `plugins/sysmgr/`（运行时就是靠 `config.json` 点名加载它的），变的是"谁来编它"。
-
-
-
----
-
-## 一、这一版和上一版的区别（为什么值得重写）
-
-v1 的骨架方向是对的，但评审发现的问题集中在"热插拔"这条主线上，而且**那条路径
-从来没被运行过**。v2/v3 重写时把下面这些当硬指标：
-
-| v1 的问题 | v2/v3 怎么解决 |
+| 参数 | 说明 |
 | --- | --- |
-| 插件能拿到哈希表内部指针，宿主一边 rehash 一边被插件无锁读 | 插件**拿不到任何表**，只有 `acquire(key, gen)` / `release(key)` |
-| `mdpsr_state` / `HashMap` / `std::mutex` 写在 ABI 里 → ABI 实际绑死 MSVC 版本 | ABI 是**纯 C99 头文件**，只有 POD 和函数指针 |
-| 卸载不回收内存（State 载荷永远留在全局池） | **每插件一个池**，卸载时整池销毁；工厂从 `ctx->pool` 分配 |
-| `Ptr` 的代际问题让"重载"没法做 | 条目控制块**永不释放** + `gen` 代际，`want_gen` 对不上就是 `STALE` |
-| 卸载时持着插件表锁去 `join()` 队列线程 → 可死锁 | 记录永不释放，join 全程不持有插件表锁 |
-| 任何线程都可以无限期等一把资源锁 → 队列线程卡住，卸载等它到天荒地老 | **所有条目锁等待都有上界**（`MDPSR_LOCK_WAIT_MS`），超时即放弃并回滚消息 |
-| `cmd=1/cmd=2` 一个调用点都没有，卸载路径零覆盖 | `sysmgr` + 自测真的跑 **1000 轮装-卸**（含并发捣乱线程） |
-| GUI 必须挂宿主主线程（`Queue_gui`），而那条路径**零测试覆盖** | v3 把宿主 GUI 队列**删掉**：GUI 变成普通插件 `winmsg`（自己开线程），宿主主线程彻底架空 |
+| `--root <dir>` | 运行时根目录（默认 exe 所在目录） |
+| `--duration <ms>` | 跑多久（0 = 一直跑到进程被杀） |
+| `--log <file>` | 同时写日志文件 |
+| `--quiet` | 只打 `WARN` 以上 |
+| `--debug` | 连 `DBG` 级日志一起打（默认打 `INFO/WARN/ERR`） |
+| `--selftest` | 热插拔自测 + GUI 阶段（成功 `0` / 失败 `3`） |
+| `--guitest` | 只跑 GUI 阶段（成功 `0` / 失败 `4`） |
+| `--cycles <n>` | 自测循环次数（默认 20） |
+| `--watchdog <ms>` | 定期打印"谁握着哪把锁 / 队列在哪一步" |
 
-重写过程中被压力测试抓出来的真 bug（现在都修了，且都写进了代码注释）：
+**各自需要哪个 `Mode` 编出来的产物：**
 
-1. 队列线程在 `join()` 期间被卸载方持有的 handle 锁挡住 → 死锁；
-2. `Registry::acquire` 在"看过 gen 之后"才阻塞等锁 → 同一个形状的死锁；
-3. 卸载时"先全部置无效再抢锁"→ 在途的 handle 会看到半死不活的插件而返回莫名其妙的错误码；
-4. `winmsg.Control` 里**嵌套借** `Shelf`(Object) 和 `Screen`(State)：
-   两个键的哈希大小是任意的，嵌套借就违反"按键升序" → `LOCK_ORDER`；
-5. **装载中途的 handle 借不到自己的 State**（`11019`）：半装好的条目已经挂进表了，
-   也就能被分发到。修法是**上线门闸**（`published`）：READY 之前谁也借不到，
-   分发路径遇到没上线的 handle 回 `BUSY` 让消息重投（不是死信）；
-6. **装载失败回滚可能整池回收别人手里的载荷**：回滚时"抢不齐锁也照样 `pool_delete`"。
-   同一个上线门闸把它变成不可能（半装好的东西根本借不到）；
-7. **管理面唯一还能闭合的等待环**：卸载路径持着 `_ctrl_mtx` 去 join 队列线程，而那条
-   线程上的插件代码正阻塞在同一把锁上。修法是"插件代码进管理面只 `try_lock`，失败给
-   `BUSY`"，由内核插件重试（见 `sysmgr` 的 `call_mgmt`）；
-8. **重建出来的 GUI 窗口一直看不见**：显示标志是全局的，于是只有第一扇窗被 `ShowWindow`
-   过（`UpdateLayeredWindow` 自己不会显示窗口）。修法：每扇窗各一个标志，并且
-   `slot.visible` 让自测能验"真的可见"；
-9. **真实鼠标点击收不到**：`WM_NCHITTEST` 无条件返回 `HTCAPTION`，点击被系统当拖拽吃掉。
-   修法：默认 `HTCLIENT`，"整窗可拖"改成客户端点名的 `WINMSG_F_DRAGGABLE`；
-10. **自愈之后事件收不到**：窗口被回收时目录格子清零、订阅跟着没了，而自愈路径只
-    `winmsg_open` 没重新订阅。修法：统一用 `winmsg_open_ex`（登记 + 订阅 + 可拖）。
-
----
-
-## 二、四条约定
-
-### 1. 消息是字节流
-
-帧头 24 字节：
-
-```
-偏移 0   uint64_t dst    目标 handle 的键 (hash)
-偏移 8   uint64_t src    发送者 handle 的键, 0 = 宿主
-偏移 16  int32_t  cmd    命令号
-偏移 20  int32_t  len    本条消息总字节长 (= 24 + body)
-偏移 24  uint8_t  body[] 载荷, 由收件组件自己解释
-```
-
-* 判命令**只读 `msg->cmd`**；body 里的参数"长度够才读"。
-  同一条命令可能只有 `_cmd`、也可能带更多字段，先要求整条结构体再判断的写法
-  会让组件在收到短消息时直接变砖。
-* `cmd = 0` 恒为初始化（约等于别的框架里的 Main），`1..15` 是框架保留
-  （`REPLY` / `FAIL` / `PING` / `PONG` / `STOP`），插件自己的命令从 **16** 开始。
-* `src` 是"请求-回包"的全部机制，宿主也能在消息投给一个已经不在的 handle 时回一条
-  `FAIL` 告诉发件人。
-
-### 2. 名称一律哈希成 `uint64_t` 当标识
-
-`mdpsr_hash64(名称)` 是全进程唯一的物体标识。组件之间**不需要 include 对方的头文件**，
-名字对上就能互相找到。条目名**全局唯一** —— 装载时真的检查重名，撞了就装不上
-（v1 只把这条写在注释里）。
-
-### 3. 托管资源只能"借"，不能拿指针存着
-
-```c
-int      acquire(host, key, want_gen, &ptr, &gen);   // 借到 = 持锁
-void     release(host, key);                          // 归还
-void     release_all(host);                           // 归还本次调用借的全部
-uint32_t gen_of(host, key);                           // 无锁快照, 0 = 不存在/已失效
-```
-
-* **控制块永不释放**，所以永远不会拿到悬垂指针；`gen` 负责告诉你"手里这个还是不是
-  你当初要的那一个"。
-* **上线门闸**：条目挂上表但插件还没 READY 时（装载中途）`acquire` 返回 `NOT_READY`、
-  `gen_of` 返回 0 —— 谁也借不到"半装好的东西"。你不用为它写特殊逻辑：分发路径已经
-  替你挡住（消息回滚重投），只有你主动去借才会看到这个码。
-* 同一个线程里多次 `acquire`，**键必须严格递增**，否则返回 `LOCK_ORDER`。
-  这条规则把"插件之间互相咬锁"的死锁在结构上消灭掉了（详见 [doc/架构.md](doc/架构.md)）。
-  一次要借多个就请用 `acquire_many`，宿主内部帮你排序。
-* 宿主在**每次调用插件代码**时都开一个作用域；作用域退出时如果还有没还的锁，
-  宿主替你还掉并记一条 WARN。**所以"插件漏锁把运行时卡死"不可能发生。**
-
-### 4. 不要跨插件同步调用函数
-
-插件之间只通过 `emit` 投消息。这是"宿主可以安全 `FreeLibrary`"的前提：
-任何时刻正在执行的插件代码，必然是被宿主在分发路径上持着锁调起来的，
-而卸载会先拿到全部锁再卸。
-
----
-
-## 三、目录与产物
-
-```
-CMakeLists.txt                     ★ 整个项目唯一的编译入口 (BUILD / PLUGIN_LIST / Mode)
-src/
-├── main/                          框架那一半 (里面没有任何插件路径)
-│   ├── include/mdpsr/abi.h        ★ 唯一的二进制契约 (纯 C99)
-│   ├── runtime/                   registry / queue / runtime / loader / json / host_api
-│   ├── main.cpp                   主程序 (含热插拔压力自测; GUI 阶段在 test/)
-│   ├── sysmgr/                    ★ 内核组件: 有装卸权限, 驱动热插拔
-│   │   └── README.md              和框架一起编, 不进 PLUGIN_LIST
-│   ├── CMakeLists.txt             只产出 mdpsr_runtime / mdpsr.exe / mdpsr_sysmgr
-│   └── config.json                ★ 规范顺序的基准清单 (产物里那份是生成的, 见下)
-├── components/                    插件那一半: 每个组件一个文件夹, 各自独立工程
-│   ├── demo_protocol.h            演示插件之间的协议 (不是框架的一部分)
-│   ├── alpha/                     演示: 自转循环 / 队列限速 / 回包
-│   ├── beta/                      演示: 没声明队列 -> 走默认队列 / 跨插件请求
-│   ├── gamma/                     演示: 多 handle 一条队列 / 运行时自建队列
-│   ├── winmsg/                    ★ GUI broker: 框架里唯一碰 Win32 的组件
-│   │   ├── winmsg_protocol.h      窗口/画面/事件的纯 C 协议 (两端共用)
-│   │   ├── winmsg_client.h        客户端助手 (纯 C, 不含 Windows 头)
-│   │   └── winmsg.cpp             GUI 线程 / WndProc / 缩放+偏置+贴图 (C++)
-│   └── paint/                     演示: 一个不含任何 Windows 代码的 GUI 客户端
-└── cmake/                         公共编译设置 (mdpsr_common, 也在这里兜底 MDPSR_OUT)
-
-test/                              ★ 测试模块 (刻意不进 src: 删掉整个目录, 框架一样跑)
-├── gui_test_protocol.h            三个测试插件的参数表 + 参考光栅器 (插件与自测共用)
-├── gui_client_common.h            三个测试客户端的公共实现
-├── gui_selftest.{h,cpp}           GUI 阶段的全部断言 (宿主只调一个入口)
-├── circ_a/   图比窗口小, 换色动画, 点击关窗后自愈
-├── circ_b/   图比窗口大(系统裁剪), 缩放动画, 整窗可拖
-└── circ_c/   放大 2 倍 + 偏置跑到出界, 点击关窗后自愈
-
-doc/
-├── 架构.md                        设计说明: 锁序 / 生命周期 / 为什么不会死锁
-├── 插件规范.md                    怎么写一个插件
-└── GUI.md                         GUI 与 winmsg 的唯一权威文档
-archive/                           旧实现与旧文档
-```
-
-> 每个组件 / 测试夹具的文件夹里都有自己的短 `README.md`（"这是什么 / 有哪些条目 /
-> 看日志找什么"），不用翻源码就能认出它是干嘛的；细节仍然看 `doc/` 下的三份权威文档。
-
-
-构建产物（每个插件一个自包含子目录，可以整个拷走）。下面用 `<BUILD>` 指代你传的产出目录，
-不传就是 `<根>/build`：
-
-```
-<BUILD>/
-├── mdpsr.exe
-├── config.json                    ★ 由根 CMakeLists 按本次编出来的插件集合生成
-├── plugins/
-│   ├── sysmgr/{mdpsr_sysmgr.dll, plugin.json}    (内核, 跟框架一起编)
-│   ├── winmsg/ paint/                            (组件)
-│   ├── alpha/ beta/ gamma/                       (组件)
-│   └── circ_a/ circ_b/ circ_c/                    (test/ 里的测试夹具)
-├── _framework/                    CMake 中间树 (框架的 vcxproj/obj, 别删别拷)
-└── _plugins/<名字>/                CMake 中间树 (每个插件各自的 build 树)
-```
-
-上面两个 `_` 开头的目录只是 CMake 的**二进制树**（`add_subdirectory` 需要各自的
-binary dir），真正的产物只有 `mdpsr.exe` / `config.json` / `plugins/`。
-这也是为什么插件的产物路径要显式钉成 `${MDPSR_OUT}/plugins/<名字>` ——
-不然它们会顺着各自的 binary dir 落进 `_plugins/alpha/plugins/alpha/`。
-
-产物路径统一走 `MDPSR_OUT`（根 CMakeLists 把它设成 `${BUILD}`，`src/cmake` 里兜底成
-`<根>/build`）。**插件的输出目录绝不能用 `CMAKE_BINARY_DIR`** —— 插件是各自独立
-configure 的独立工程，那样会变成 `build/plugins/alpha/plugins/alpha/` 套娃。
-
-单独编译某个插件也行（每个文件夹都是完整工程，自带 `CMakeLists.txt` + `plugin.json`）：
-
-```powershell
-cmake -S src/components/alpha -B build_alpha -G "Visual Studio 18 2026" -A x64
-cmake --build build_alpha --config Release
-# 产物同样落进 <根>/build/plugins/alpha/ (MDPSR_OUT 兜底成 <根>/build)
-```
-
----
-
-## 四、插件清单 `plugin.json`
-
-```jsonc
-{
-  "name":     "alpha",                    // 插件名 (全局唯一)
-  "kernel":   false,                      // 有没有装卸别人的权限, 默认 false
-  "dll_path": "mdpsr_alpha.dll",          // 相对本清单所在目录; 也可以是数组
-
-  "State":  ["alpha.Stats"],              // -> mdpsr_state_alpha_Stats  (+ _destroy 可选)
-  "Object": ["alpha.Keeper"],             // -> mdpsr_object_alpha_Keeper (+ _destroy 可选)
-  "Handle": ["alpha.Handle"],             // -> mdpsr_handle_alpha_Handle
-  "Queue":  ["Queue_alpha"],              // 可选; 省略就用 Queue_default
-  "Init":   "alpha.Handle",               // 可选: 谁的 cmd=0 是初始化入口
-  "list":   ["demo", "paced"]             // 可选: 给工厂的附加字符串数组
-}
-```
-
-必需导出：`mdpsr_abi_version` / `mdpsr_module_init`（`mdpsr_module_fini` 可选）。
-
-`config.json` 的 `plugin` 列表**就是依赖顺序**：前面的先装好，后面的在自己的
-`cmd=0` 里才看得到前面插件的 State。声明了却装不上会**直接判定引导失败**
-（退出码 2），而不是带着半个系统往下跑。
-
-产物里那份 `<BUILD>/config.json` 是**根 CMakeLists 在 configure 阶段生成**的，内容 =
-本次**真正编出来的**插件集合（`sysmgr` + `PLUGIN_LIST`/`Mode` 推出来的那些）。
-顺序沿用仓库里 `src/main/config.json` 那份基准清单 —— 它是"规范顺序"的唯一出处
-（体现依赖关系：`sysmgr` 在内核位、`winmsg` 在 GUI 客户端前面）；这次没编的跳过，
-编了但基准清单里没有的追加到末尾。`src/main/config.json` 本身保留不动。
-
-全量装九个时就是：`sysmgr / alpha / beta / gamma / winmsg / paint / circ_a / circ_b / circ_c`。
-`TXST1` 下生成的则是 `sysmgr / winmsg / paint / circ_a / circ_b / circ_c`。
-
----
-
-## 五、两条固定队列 + 插件自己的队列
-
-| 队列 | 谁建 | 跑法 | 用途 |
-| --- | --- | --- | --- |
-| `Queue_sys` | 宿主 | 常驻线程 | 内核/管理：装卸都在这条上跑 |
-| `Queue_default` | 宿主 | 常驻线程 | 没声明 `Queue` 的 handle 都走这条 |
-| 插件自己的 | 清单里的 `Queue` 段 | 各自一条线程 | 需要独立节奏/线程亲和的时候用 |
-
-**每一条队列都是"一条自己的线程"**。v3 删掉了以前那种"挂在宿主主线程上、由主循环泵"
-的队列模式 —— 它全框架唯一零测试覆盖，而且宿主主线程现在什么也不管了。
-
-`Queue` 自带**限速计时器** `pace_ms`：两条消息的**处理开始时间**至少隔那么久。
-这就是"防止有天才拿队列当 while 用"的地方 —— 插件自己不需要 `sleep`。
-（`alpha` 用它跑 12ms 的自转，`paint` / `circ_*` 用它当 8~16ms 的动画钟。）
-
-队列的**归属是硬边界**：运行时 `queue_create` 对同一个名字只在同一个主人那里幂等
-（被别人占了 → `ALREADY_EXISTS`）；`queue_bind` 只能绑自己的 handle 到自己的（或宿主的）
-队列。理由见 [架构.md](doc/架构.md) 第五节：卸载要 join 队列线程，队列归属不清就会
-变成"帮别人 join"。
-
-两个细节这一版特意做对了：
-
-* 宿主在 `init` 里 `timeBeginPeriod(1)`。不这么做 Windows 的 sleep 粒度是 ~15.6ms，
-  声明 `pace_ms = 20` 实际会跑成 ~31ms（v1 就是这样）。
-* 队列是**有界**的：`capacity` 是硬上限，满了 `push` 直接返回 `QUEUE_FULL`。
-  v1 的队列无限增长，"生产者比消费者快"最终表现为吃光内存而不是一个可处理的错误码。
-  生产者必须认这个错误（demo 里的捣乱线程就是满了就退让）。
-
----
-
-## 六、热插拔：装、卸、重载
-
-* **装**：`host->plugin_install("plugins/alpha/plugin.json", opts, &key)`
-  解析清单 → 检查条目名全局唯一 → 建池 → 装 dll（核对 ABI）→ 建队列 → State →
-  Object → Handle → **上线（publish）** → 宣布 READY →（默认）在**调用者线程上同步跑
-  一次 Init handle 的 `cmd=0`**。
-  任何一步失败会回滚得干干净净（现在连"回收池的时候别人手里还攥着载荷"这种理论窗口
-  也关掉了），并且**返回错误码**（不是"装载成功但少了一半资源"）。
-* **卸**：`host->plugin_uninstall(key, flags)`
-  先独占全部 handle → 全部置无效 → 独占其余条目 → 停队列并 join → 调 `_destroy` →
-  摘表 → `FreeLibrary` → **整池回收** → 最后放 handle 锁。
-  拿不到锁不是错：返回 `PLUGIN_BUSY`，调用方下轮再来（demo 里 `sysmgr` 就是这么做的）。
-* **重载**：`host->plugin_reload(key, opts)` = 卸载 + 重新装载，`gen` 会 +1。
-  卸载之后能重新装回来，这是 v1 做不到的（当时的文档把"代际"列为重载的前置难题）。
-
-**只有 `"kernel": true` 的插件**能调这三个函数（宿主自己是 0 号特权调用者）。
-另外**插件不能卸载自己**，也不能在插件调用里要求装卸（返回 `REENTRANT`）。
-
-⚠ **内核插件必须自己处理 `BUSY`**：宿主对"插件代码发起的装卸"不阻塞（拿不到管理面
-立刻返回 `BUSY`），因为卸载路径持着管理面的锁去 join 队列线程 —— 插件代码要是也阻塞
-在那把锁上就是个死环。写法见 [插件规范.md](doc/插件规范.md) 第六节 / `sysmgr` 的
-`call_mgmt()`。
-
----
-
-## 七、演示插件在演示什么
-
-装哪些是由生成的 `<BUILD>/config.json` 决定的：`sysmgr`（内核，跟着框架编）+
-`src/components/` 里的组件 + `test/` 里的三个 GUI 测试客户端。全量九个就是
-`sysmgr / alpha / beta / gamma / winmsg / paint / circ_a / circ_b / circ_c`。
-
-| 插件 | 演示的机制 |
+| 命令 | 需要 |
 | --- | --- |
-| `sysmgr` | 内核能力；收消息去装/卸/重载别的插件；把账本放进 `sysmgr.Status` 供别人借阅 |
-| `alpha` | State + Object + **自己的队列 (pace=12ms)** + `cmd=0` 后自转 + 请求/回包 + 跑够 240 拍自己收工 |
-| `beta` | **不声明队列**（落 `Queue_default`）+ 跨插件 `PING → PONG`（只知道名字，不 include 任何东西） |
-| `gamma` | 两个 handle 共用一条队列 + **运行时自己 `queue_create` 一条队列** + State/Object 析构日志 |
-| `winmsg` | **GUI broker**：自己开一条 GUI 线程跑 Win32 消息循环，把窗口"借"给别的插件用 |
-| `paint` | **一个不含任何 Windows 代码的 GUI 客户端**：申请窗口、刷纯色圆、挪偏置、收窗口事件 |
-| `circ_a/b/c` | 同上的测试客户端（`test/`），几何/颜色/节奏各不相同：小图、大图、放大出界 |
+| `--guitest` | **`-DMode=TXST1`**（`winmsg` + `paint` + `circ_a/b/c`，正好是 GUI 自测的夹具） |
+| `--selftest` | **全部九个插件**（`sysmgr` + 组件 + `test/` 的 `circ_*`）。`TXST2` 不含 `circ_*`，所以跑不完整 |
+| `--duration` / `--watchdog` | 任意 `Mode`；装哪些由生成的 `<BUILD>/config.json` 决定 |
 
-### GUI 是怎么做到"客户端一行 Win32 都不用写"的
-
-GUI 的所有 Win32 细节都关在 `winmsg` 里（它自己开一条 GUI 线程跑消息循环、贴图）。
-别的插件只认**三条通道**：
-
-| 通道 | 走什么 |
-| --- | --- |
-| **画面**（要显示什么） | **状态**：改自己那张 `<插件名>.Surface` 的**图像指针 + 缩放 + 偏置**，`content_seq++` 就是"发布了新一版" |
-| **事件**（按了什么） | **消息**：broker 在 WndProc 里把 Win32 消息翻译成纯 C 的 `winmsg_event`，`emit` 到客户端注册的 handle（`cmd=16`） |
-| **高频输入**（鼠标在哪） | **状态快照**：`slot.mx/my/buttons/input_seq`，客户端自己轮询 |
-
-一句话判据：**每条都要处理、顺序有意义 → 消息；只要最新一版 → 状态。**
-
-**渲染管线（协议 v2）**：客户端给一块四通道 BGRA 内存图，加两个参数 ——
-
-| | 参数 1 | 参数 2 |
-| --- | --- | --- |
-| 形状 | **RECT**（`slot.win`） | **POINT + 缩放**（`surf.img_pos` / `surf.scale_*`） |
-| 管什么 | 窗口在屏幕上的**绝对位置与尺寸** | **图在窗口里怎么摆**：先按 scale 缩放，再把**原图左上角**放到 `img_pos` |
-| 谁执行 | GUI 线程 `SetWindowPos` | GUI 线程组合画布 + `UpdateLayeredWindow` |
-
-管线固定是 **先缩放 → 再偏置 → 写画布 → 窗口外交给系统裁**。画布和客户区一样大、
-初始 alpha=0：**没被图写到的像素就是透明的（直接透出桌面），图超出窗口的部分根本
-不写** —— 所以"图比窗口大""偏置跑到出界"都不需要任何特判。坐标系原点统一是**左上角**
-（和 Win32 一致）。
-
-窗口是 `WS_EX_LAYERED` 分层窗口：无边框、默认整扇透明；**整窗可拖是客户端点名的**
-（`WINMSG_F_DRAGGABLE`，代价是那扇窗收不到真实的鼠标按下/抬起）。
-
-```c
-#include "winmsg_client.h"        /* 纯 C, 不含任何 Windows 头 */
-/* 要窗口 + 订阅事件 + (可选)可拖, 一步到位; 窗口被回收后自愈也用它 */
-winmsg_open_ex(H, mdpsr_hash64("paint.Window"), 160,160, 220,160,
-               mdpsr_hash64("paint.Events"), 掩码, /*draggable=*/0, &surf);
-winmsg_surface* s = NULL;
-if (winmsg_lock_ex(H, surf, &s) == MDPSR_OK) {   /* BUSY = 忙, 下轮再来 */
-    /*   s->pixels / scale_x / scale_y / img_pos   */
-    winmsg_unlock(H, surf, s, 1);                /* 发布新一版 */
-}
-winmsg_move(H, win, x, y);                       /* 挪窗口 (RECT) */
-```
-
-> **完整文档见 [doc/GUI.md](doc/GUI.md)** —— 资源地图、**可调参数手册**（含 4 通道图像
-> 约定与缩放/偏置语义）、重绘与挪窗的完整链路、事件种类表、硬规则、12 条踩过的坑、
-> 自测清单、边界清单。
-
----
-
-## 八、自测：它到底验证了什么
-
-`build\mdpsr.exe --selftest --cycles N` 会一边**开 4 条捣乱线程往这些插件里灌消息**，
-一边做这些事（`--cycles 1000` 大约 90 秒）：
-
-1. **宿主路径**：`gamma` 装-卸 N 轮。每一轮都核对"装着的条目数 = 基线 + 它声明的条目数"、
-   "队列数 = 基线 + 2"（清单里一条 + 运行时自建一条），卸完必须**精确回到基线**
-   —— 这同时验证了"每插件池整池回收"和"队列线程真的停干净了"。
-2. **宿主路径**：`beta` 重载 N 次。
-3. **消息驱动路径**：给 `sysmgr` 投一条 `CYCLE`，让它**自己**把 `alpha` 装-卸 N 轮，
-   宿主靠轮询 `install_count` 确认它真的做了（`install_count 1 -> N+1`）。
-4. **收尾核对**：注册表条目/队列数回到基线、没有漏还的锁、没有越序借用、
-   **没有任何 handle 返回过失败码**。
-5. **GUI 阶段**（`test/gui_selftest.cpp`，122 条断言）：`winmsg` + `paint` + `circ_a/b/c`
-   四扇窗都在，逐项验 **窗口真的可见** / 换色动画 / **缩放+偏置+出界透明的像素级比对**
-   / RECT 移动与缩放 / 方向键端到端挪窗 / 输入分流 / **模拟点击关窗+自愈** / WM_CLOSE /
-   **三个测试插件的卸载-装回-重载**。
-
-想只跑 GUI 阶段（改 winmsg 或 GUI 客户端时更快）：
-
-```powershell
-build\mdpsr.exe --guitest        # 几秒钟, 122 条断言, 成功退出码 0
-```
-
-实测（Release，本机）：
-
-```
---selftest --cycles 1000 : 全部通过 / 装卸 12026 次 / handle 失败 0 / 兜底还锁 0 / 越序 0
-                          GUI 阶段 122 条断言全过 (窗口可见性、像素级缩放偏置透明、
-                          模拟点击关窗自愈、三个测试插件热插拔)
-```
-
-顺便：`build\mdpsr.exe --duration 5000` 会在屏幕上放 **4 扇透明窗口**（各自一个纯色圆，
-颜色按帧号+鼠标位置变）。窗口没有标题栏，但外面读得到它们的标题 ——
-`Get-Process mdpsr | Select MainWindowTitle` 会显示 `winmsg: paints=N`，
-一眼就能确认"窗口真的在、而且真的在画"。`circ_b` 那扇开了整窗可拖；`paint` 支持
-方向键挪窗、空格暂停刷新；`Alt+F4` 关闭；`circ_a`/`circ_c` 收到点击会自己关窗再自己开回来。
-
-同一份代码在 **AddressSanitizer** 下跑也是干净的（无 ASan 报告）。本轮改动后用
-`--cycles 200` + GUI 阶段复验过一次。ASan 是 CMake 开关 `MDPSR_ASAN`：
-
-```powershell
-cmake -S . -B build_asan -G "Visual Studio 18 2026" -A x64 -DMode=TXST1 -DMDPSR_ASAN=ON
-cmake --build build_asan --config Release --parallel
-# 需要把 clang_rt.asan_dynamic-x86_64.dll 放到 exe 旁边
-```
-
-> ASan 那个 DLL 在 VS 安装目录里：
-> `<VS>\VC\Tools\MSVC\<版本>\bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll`。
-> 另外别设 `ASAN_OPTIONS=detect_leaks=1` —— 这个平台不支持，进程会直接退出。
-> **`MDPSR_ASAN` 活在 CMake 缓存里**：跑过一次 `-DMDPSR_ASAN=ON` 之后，不带这个参数
-> 重新 configure 的同一个 build 目录会**悄悄继续**用 sanitizer 编，然后因为没有那个
-> DLL 而以 `STATUS_DLL_NOT_FOUND` 退出。换配置请显式传 `-DMDPSR_ASAN=OFF`，或者干脆
-> 用另一个 `-B` 目录。
-
-### 卡住的时候用什么
-
-`--watchdog <毫秒>` 会定期打印：每个插件的状态与 gen、**哪条资源的锁正被谁握着**、
-每条队列的 `used/pushed/popped/full/paced` 和"它的线程现在在哪一步"
-（`run:top` / `run:wait-pace` / `run:dispatch` / `d:plugin-call` …）。
-这次重写里几个死锁就是靠它定位的 —— 因为这台机器上没有装调试器。
-
-设 `MDPSR_TRACE=1` 还能打开卸载路径的分步跟踪（`[trace] 3 drop_queue ...`）。
-
----
-
-## 九、已知边界（诚实清单）
-
-| 项 | 现状 |
-| --- | --- |
-| **没有优先级队列** | 队列是严格 FIFO。把队列灌满会让插件自己的控制消息排在后面（head-of-line blocking）。要优先级得再分一条队列 |
-| **回包是异步的** | 没有"发一条消息然后阻塞等回复"的 API；要么用状态（像 `sysmgr.Status`），要么做成状态机 |
-| **同步初始化的线程契约** | `MDPSR_INSTALL_SYNC_INIT` 会在**调用者线程**上跑一次 `cmd=0`。所以 `cmd=0` 里不能假设"我在自己的队列线程上"；需要线程亲和的初始化请投一条消息给自己 |
-| **队列容量是硬上限** | 投递方必须处理 `QUEUE_FULL`；宿主不会替你缓冲 |
-| **插件名/条目名全局唯一** | 两个插件不能声明同名条目（装载时会拒绝）。这是"用名字当键"的必然代价 |
-| **只有 x64** | 大结构体的尺寸/对齐没为 32 位算过 |
-| **同步跨插件调用不支持** | 有意为之：它是"能安全 FreeLibrary"的前提 |
-| **`acquire` 的顺序规则** | 同线程内键必须递增，否则拿到 `LOCK_ORDER`。这是拿"死锁不可能"换来的（GUI broker 就踩过一次：嵌套借 `Shelf` 和 `Screen`） |
-| **管理面对插件代码不阻塞** | 插件代码调装卸拿不到管理面会得到 `BUSY`，必须自己重试（内核插件的义务） |
-| **GUI 是"最新值"语义** | 画面走状态，所以客户端来不及画的那几版会被**自然合并**掉，不保证"每一版都显示过" |
-| **GUI 缩放是最近邻** | 放大就是像素块；要平滑请在客户端自己先缩放好。每帧成本 ≈ O(窗口像素) × 脏窗口数（没有脏矩形） |
-| **窗口事件会丢（有计数）** | 客户端队列满时事件会被丢掉并在 `slot.events_dropped` 里计数，不会反压 GUI 线程（故意的：慢客户端不该卡住界面） |
-| **一个 GUI 线程 / 目录一把锁** | 所有窗口共用 `winmsg` 那条 GUI 线程和 `winmsg.Screen` 这条 State（控制面串行）；数据面（每窗口的 `Surface`）各一把锁，互不阻塞。窗口特别多 / 要 GPU 时再写一个新 GUI 插件（协议不用变） |
-| **可拖窗口收不到鼠标按下/抬起** | 只对点了 `WINMSG_F_DRAGGABLE` 的窗口成立；默认是普通客户区，点击全都到客户端 |
-| **ASan 的泄漏检测** | Windows 上 ASan 不支持 `detect_leaks`，所以"不泄漏"靠的是自测里的条目/队列基线核对 |
-
----
-
-## 十、工具链
-
-| 工具 | 本机位置 |
-| --- | --- |
-| CMake ≥ 3.20 | `D:\Cpp\cmake\bin\cmake.exe`（已挂 PATH） |
-| MSVC (x64) | Visual Studio Community 2026，`D:\Program Files\vs` |
-| 生成器 | **`Visual Studio 18 2026`（MSBuild）+ `-A x64`** |
-
+GUI 的完整参数手册、事件表、踩过的坑在 [doc/GUI.md](doc/GUI.md)。
