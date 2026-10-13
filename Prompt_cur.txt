@@ -116,3 +116,31 @@ Handle无状态函数,接口规范为(字节串,Context),建议在此处完成cm
 Init:指定的handle,必须包含一个cmd=0的初始化函数,用来激活插件工作
 
 
+添加新的内核组件/src/components/systimer
+{
+"name":"systimer"
+"Handle":
+"State":["systimer.timetable"]
+"Queue":`Queue_sys
+"Init":
+
+
+}
+handle
+cmd=17,解析body
+{
+    long _time#单位ms
+    body[]
+}
+body是字节串,当前时间+_time和字节systimer.timetable拼凑插入systimer.timetable
+
+cmd=18,遍历timetable,将当前时间等于timestp的后面的回调
+
+systimer.timetable
+列表[{timestp,body}]
+
+
+再根.md增加规范
+订阅,在message.body载荷加入一条完整的消息,然后接收插件将完整消息按消息传出去,不修改该消息
+回调,在一个cmd入口,执行完消息之后,再发消息调用自己的这个cmd叫做回调
+

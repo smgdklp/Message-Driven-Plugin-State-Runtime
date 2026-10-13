@@ -3,14 +3,14 @@
 > GUI 的唯一权威文档。README / 架构.md / 插件规范.md 只留指路。
 >
 > 两个角色：
-> * **GUI 插件 `winmsg`** —— 框架里**唯一**碰 Win32 的组件。它自己开一条 GUI 线程，
->   建窗口、泵消息、贴图。
+> * **GUI 插件 `winmsg`** —— 框架里**唯一**碰 Win32 的组件。它自己开一条 GUI 线程，建窗口、泵消息、贴图。
 > * **GUI 客户端** —— 任何想显示东西的普通插件。**它一行 Windows 代码都不用写。**
 
 ---
 
-## 一、示例GUI
-窗口是"透明分层窗口"，画面是一块四通道内存图
+## 一、示例 GUI
+
+窗口是"透明分层窗口"，画面是一块四通道内存图。
 
 ```
 ┌─ winmsg (GUI 插件, C++) ────────────────────────────────────────────────┐
@@ -29,17 +29,13 @@
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-**窗口是 `WS_EX_LAYERED` 分层窗口，默认整扇都是纯透明的**：
+**窗口是 `WS_EX_LAYERED` 分层窗口，默认整扇都是纯透明的**：画布是一张和窗口一样大的 32bpp 预乘 BGRA
+DIB，**初始全 0（alpha=0）**；每次重绘把客户端给的图**先缩放、再偏置**，最近邻采样写进画布，最后
+`UpdateLayeredWindow(ULW_ALPHA)` 整张交给系统合成。**没被图写到的画布像素 alpha=0 → 直接透出窗口
+后面的桌面/别的窗口**；图超出画布的部分根本不写 → 同样透明；窗口超出屏幕的部分由系统裁掉。
 
-* 画布是一张和窗口一样大的 32bpp 预乘 BGRA DIB，**初始全 0（alpha=0）**；
-* 每次重绘：客户端给的图先**缩放**、再**偏置**、然后最近邻采样写进画布，
-  最后 `UpdateLayeredWindow(ULW_ALPHA)` 整张交给系统合成；
-* **没被图写到的画布像素 alpha=0 → 直接透出窗口后面的桌面/别的窗口**；
-* 图超出窗口（画布）的部分根本不写 → 同样是透明；窗口超出屏幕的部分由系统裁掉。
-
-**宿主主线程完全没参与**：它不建窗口、不泵 Win32、也不拥有任何队列。GUI 线程是
-`winmsg` 用 `std::thread` 自己开的，所以"卸载前 join"是它自己的责任（放在 Object 的
-`_destroy` 里，自测每次收工都走一遍）。
+**宿主主线程完全没参与**：它不建窗口、不泵 Win32、也不拥有任何队列。GUI 线程是 `winmsg` 用
+`std::thread` 自己开的，所以"卸载前 join"是它自己的责任（放在 Object 的 `_destroy` 里）。
 
 ---
 
@@ -75,11 +71,9 @@
 | `winmsg.Control` | Handle | 宿主/内核 | `cmd=0` 启动 GUI 线程；统计查询；关全部窗；**自测钩子（注入 / 采画布像素）** |
 | `<插件名>.Surface` | State（公共） | 客户端写参数，broker 写计数 | 图像指针、尺寸、**缩放**、**偏置**、`content_seq`、已贴序号、实际绘制区域 |
 
-两条硬性质：
-
-* **`HWND` 出不了 `winmsg`**：Shelf 是 Object，别的插件 `acquire` 直接吃 `NO_PERM`（11016）。
-* **每个窗口一把自己的锁**：画面在**客户端自己的 State** 里，broker 贴图借的是那一格
-  自己的锁，不是全局大锁 —— 客户端之间不互相阻塞。
+两条硬性质：**`HWND` 出不了 `winmsg`**（Shelf 是 Object，别的插件 `acquire` 直接吃 `NO_PERM` 11016）；
+**每个窗口一把自己的锁**（画面在客户端自己的 State 里，broker 贴图借的是那一格自己的锁，客户端之间
+不互相阻塞）。
 
 ---
 
@@ -99,18 +93,15 @@
 | 生效 | 下一帧（≤ `frame_ms`，默认 16ms） | 下一帧 |
 | 回读 | `winmsg_get_rect` → `slot.cur`（**系统认的**实际矩形） | `surf.last_dst_*` / `last_img_*` / `last_scale_*` |
 
-**参数 1 链路**：`winmsg_move` → 填 `slot.win` + `win_seq++` → GUI 线程 `SetWindowPos` →
-`GetWindowRect` 写回 `slot.cur` → 下次组合画布按新窗口大小。
-用户自己拖动窗口（只对开了 `WINMSG_F_DRAGGABLE` 的窗口）时，`WM_MOVE` 也会把
-系统认的矩形写回 `slot.cur`，所以客户端按 `cur` 算出来的下一次移动不会"弹回去"。
+**参数 1 链路**：`winmsg_move` → 填 `slot.win` + `win_seq++` → GUI 线程 `SetWindowPos` → `GetWindowRect`
+写回 `slot.cur` → 下次组合画布按新窗口大小。用户自己拖动窗口（只对开了 `WINMSG_F_DRAGGABLE` 的窗口）时
+`WM_MOVE` 也会把系统认的矩形写回 `slot.cur`，所以客户端按 `cur` 算出来的下一次移动不会"弹回去"。
 
-**参数 2 链路**：改 `scale`/`img_pos` + `content_seq++` → GUI 线程发现
-`content_seq != painted_seq` → 缩放 + 偏置 + 组合画布 → `UpdateLayeredWindow` →
-屏幕上的圆挪到新位置，旧位置透明。
+**参数 2 链路**：改 `scale`/`img_pos` + `content_seq++` → GUI 线程发现 `content_seq != painted_seq` →
+缩放 + 偏置 + 组合画布 → `UpdateLayeredWindow` → 屏幕上的圆挪到新位置，旧位置透明。
 
-**为什么用序号（`win_seq` / `content_seq`）而不是布尔标志**：客户端在 broker 处理请求的
-瞬间又改了一次，布尔标志会被连同旧值一起清掉 → 新值丢了。序号只记"我执行到哪一版"，
-永不丢。
+**为什么用序号（`win_seq` / `content_seq`）而不是布尔标志**：客户端在 broker 处理请求的瞬间又改了一次，
+布尔标志会被连同旧值一起清掉 → 新值丢了。序号只记"我执行到哪一版"，永不丢。
 
 ### 4.2 内存图像的格式约定（4 通道）
 
@@ -125,8 +116,8 @@
 | `format` | 目前只有 `0 = BGRA8888` |
 | 缩放 | `scale_x/scale_y`，0 表示 1.0，负值 = 镜像；采样是**最近邻** |
 
-**"透明底 + 纯色圆"就是这么画的**：圆内 `alpha=255`、圆外 `alpha=0`，把图贴到透明画布上
-就得到"窗口里只有个圆，圆外是桌面"。`winmsg_draw_circle(s, 0xFFRRGGBB)` 就是这个演示画法。
+**"透明底 + 纯色圆"就是这么画的**：圆内 `alpha=255`、圆外 `alpha=0`，把图贴到透明画布上就得到"窗口里
+只有个圆，圆外是桌面"。`winmsg_draw_circle(s, 0xFFRRGGBB)` 就是这个演示画法。
 
 ### 4.3 画面参数（`<插件名>.Surface`，全部在 `winmsg_lock_ex` / `winmsg_unlock` 之间改）
 
@@ -145,8 +136,8 @@
 ### 4.4 透明与出界的语义
 
 * **窗口默认纯透明**：画布初始全 0，`alpha=0` 的像素 `ULW_ALPHA` 之后直接透出桌面。
-* **出界不用特判**：图超出画布的点不写、窗口超出屏幕的部分系统裁掉 —— 两层"裁剪"
-  都不需要客户端或 broker 算交集。
+* **出界不用特判**：图超出画布的点不写、窗口超出屏幕的部分系统裁掉 —— 两层"裁剪"都不需要客户端或
+  broker 算交集。
 * **整块出界**：`last_dst_w/h == 0`（broker 记的绘制区为空），这一版照样记成"已贴过"
   （`painted_seq = content_seq`），所以不会因为"什么都没画"而空转重绘。
 
@@ -168,13 +159,12 @@
 | 只要某几类 | 掩码里点名 `WINMSG_EV_BIT(kind)` |
 | 一条消息都不要（纯显示面板） | 不调 `winmsg_subscribe`（默认 `events = 0`） |
 | 连鼠标移动的消息也要 | 掩码加 `WINMSG_EV_BIT(WINMSG_EV_MOUSE_MOVE)` |
-| **这扇窗整窗可拖**（用户按住任意位置就能搬窗口） | `winmsg_set_draggable(H, 名, 1)`（= `slot.flags |= WINMSG_F_DRAGGABLE`） |
+| **这扇窗整窗可拖** | `winmsg_set_draggable(H, 名, 1)`（= `slot.flags |= WINMSG_F_DRAGGABLE`） |
 
-> **可拖的代价**：`WINMSG_F_DRAGGABLE` 的窗口会把命中测试报成"标题栏"，于是系统用
-> 鼠标拖拽把窗口搬走，**那扇窗真实的按下/抬起事件就到不了客户端了**（点击被当拖拽吃掉）。
-> 默认**不开**：默认是普通客户区，点击/抬起/滚轮/按键全都真的到客户端。
-> 这是自测抓出来的一个真问题 —— 上一版无条件 `HTCAPTION`，于是"能不能收到真实点击"
-> 是坏的，而自测当时用 `PostMessage` 注入（绕过命中测试）看不出来。
+> **可拖的代价**：`WINMSG_F_DRAGGABLE` 的窗口会把命中测试报成"标题栏"，系统于是用鼠标拖拽把窗口搬走，
+> **那扇窗真实的按下/抬起事件就到不了客户端了**。默认**不开**：默认是普通客户区，点击/抬起/滚轮/按键
+> 全都真的到客户端。（自测抓出来的真问题：上一版无条件 `HTCAPTION`，而自测当时用 `PostMessage` 注入，
+> 绕过了命中测试，看不出来。）
 
 ### 4.7 状态、可见性与关窗
 
@@ -186,17 +176,15 @@
 | 读高频输入 | `winmsg_read_input(H, 名, &in)` | `mx/my/buttons/input_seq` + 事件计数 |
 | 事件有没有丢 | `in.events_dropped` | 客户端队列满时丢的条数 |
 
-`state == READY` 只说明"目录上登记好了"，**`visible` 才是"用户看得见"**。自测会两条都查
-（`winmsg_is_visible` 就是那个"重建了但没显示"的回归测试）。
+`state == READY` 只说明"目录上登记好了"，**`visible` 才是"用户看得见"**。自测两条都查。
 
-**"窗口被关掉了"不需要消息也能知道**：`winmsg_state()` 返回 `0` 就是。
-这时**重新 `winmsg_open`（名字不用改）** 就能再要一个窗口 —— 热插拔之后客户端就是靠
-这条自己把 GUI 要回来的。
+**"窗口被关掉了"不需要消息也能知道**：`winmsg_state()` 返回 `0` 就是。这时**重新 `winmsg_open`
+（名字不用改）** 就能再要一个窗口 —— 热插拔之后客户端就是靠这条自己把 GUI 要回来的。
 
-> ⚠ **重新登记时订阅要一起重新声明**（事件发到哪个 handle / 要哪些 / 可否拖动）。
-> 格子跟着窗口一起回收，所以这些字段也没了。为免踩坑，一律用
-> **`winmsg_open_ex(H, 名, x,y,w,h, 事件handle, 掩码, 可否拖动, &surface_key)`**：
-> 首次点火和自愈走同一段代码。（这个坑自测抓到过：点击关窗自愈之后 `WM_CLOSE` 收不到了。）
+> ⚠ **重新登记时订阅要一起重新声明**（事件发到哪个 handle / 要哪些 / 可否拖动）—— 格子跟着窗口一起
+> 回收，这些字段也没了。为免踩坑，一律用
+> **`winmsg_open_ex(H, 名, x,y,w,h, 事件handle, 掩码, 可否拖动, &surface_key)`**：首次点火和自愈走同一段
+> 代码。（这个坑自测抓到过：点击关窗自愈之后 `WM_CLOSE` 收不到了。）
 
 ---
 
@@ -216,9 +204,8 @@ GUI 线程: WndProc(hwnd, WM_KEYDOWN, VK_RIGHT, ...)
 客户端自己的队列线程: handle(收到 cmd=16) -> mdpsr_read 长度校验 -> switch (ev.kind)
 ```
 
-**异步投递**：`emit` 只是塞进客户端 handle 所在的那条队列（FIFO），处理在客户端自己的
-队列线程上。**慢客户端卡不住界面**；队列满时 `emit` 返回 `QUEUE_FULL`，broker 记一笔
-`slot.events_dropped` 继续。
+**异步投递**：`emit` 只是塞进客户端 handle 所在的那条队列（FIFO），处理在客户端自己的队列线程上。
+**慢客户端卡不住界面**；队列满时 `emit` 返回 `QUEUE_FULL`，broker 记一笔 `slot.events_dropped` 继续。
 
 ### 5.2 为什么不在 WndProc 里直接调客户端
 
@@ -257,9 +244,8 @@ typedef struct winmsg_event {
 ### 5.4 高频输入走状态快照
 
 鼠标移动一秒上百条，走消息会把客户端队列灌满。所以 `WM_MOUSEMOVE`/按键状态只写
-`slot.mx/my/buttons` 并 `input_seq++`，客户端在自己的节拍里轮询一次。
-
-> 一条判据：**每条都要处理、顺序有意义 → 消息；只要最新一版 → 状态。**
+`slot.mx/my/buttons` 并 `input_seq++`，客户端在自己的节拍里轮询一次。一条判据：**每条都要处理、顺序
+有意义 → 消息；只要最新一版 → 状态。**
 
 ---
 
@@ -332,8 +318,8 @@ MDPSR_EXPORT int mdpsr_handle_myplugin_Tick(const mdpsr_msg* msg, const uint8_t*
 }
 ```
 
-（真实例子：`src/components/paint/paint.cpp`（演示客户端），以及
-`test/circ_a|circ_b|circ_c`（自测夹具，逻辑共用 `test/gui_client_common.h`）。）
+（真实例子：`src/components/paint/paint.cpp`（演示客户端），以及 `test/circ_a|circ_b|circ_c`
+（自测夹具，逻辑共用 `test/gui_client_common.h`）。）
 
 ### 6.1 客户端助手一览（`winmsg_client.h`，纯 C）
 
@@ -358,8 +344,8 @@ MDPSR_EXPORT int mdpsr_handle_myplugin_Tick(const mdpsr_msg* msg, const uint8_t*
 
 ## 七、硬规则（违反会崩、不刷新、或者收不到事件）
 
-1. **`pixels` 只在 `winmsg_lock_ex` 和 `winmsg_unlock` 之间有效。** 那把锁同时是"我正在用它"
-   的声明：broker 贴图也借它，客户端卸载会被推迟（抢不到锁 → `BUSY` → 下轮再来）。
+1. **`pixels` 只在 `winmsg_lock_ex` 和 `winmsg_unlock` 之间有效。** 那把锁同时是"我正在用它"的
+   声明：broker 贴图也借它，客户端卸载会被推迟（抢不到锁 → `BUSY` → 下轮再来）。
    **绕过锁读 `pixels` = 拿悬垂指针**。
 2. 换图像指针 / 释放旧图，都必须在锁内做。
 3. 客户端内部顺序：先读状态（`winmsg_state`/`winmsg_read_input`/`winmsg_get_rect`）→ 再 `winmsg_lock_ex`。
@@ -368,8 +354,8 @@ MDPSR_EXPORT int mdpsr_handle_myplugin_Tick(const mdpsr_msg* msg, const uint8_t*
 6. `winmsg_open` 之后等 `state == READY` 再改画面。
 7. **`SetWindowPos`/`DestroyWindow` 只能由 GUI 线程做**；客户端拿不到 `HWND`。
 8. **窗口被回收之后重新登记，订阅也要一起重新声明** —— 用 `winmsg_open_ex`。
-9. `winmsg_lock_ex` 返回 `BUSY` 是**正常回退**（资源正被 broker/别人借走），不是错误：
-   下轮再来就行。别像"资源没了"那样把自己的自转链掐断。
+9. `winmsg_lock_ex` 返回 `BUSY` 是**正常回退**（资源正被 broker/别人借走），不是错误：下轮再来就行。
+   别像"资源没了"那样把自己的自转链掐断。
 
 ---
 
@@ -383,11 +369,11 @@ MDPSR_EXPORT int mdpsr_handle_myplugin_Tick(const mdpsr_msg* msg, const uint8_t*
 | 4 | 偶尔不刷新 | 布尔脏标志会丢 | 单调递增序号 `content_seq`/`win_seq` |
 | 5 | 空闲烧 CPU / 输入一顿一顿 | `Sleep(16)` 节流 | `MsgWaitForMultipleObjects` 带超时 |
 | 6 | 窗口一直看不见 | 分层窗口创建时没带 `WS_VISIBLE`，`UpdateLayeredWindow` 也不置位 | 第一次贴图后 `ShowWindow(SW_SHOWNOACTIVATE)` |
-| 7 | **重建出来的窗口一直看不见** | 上面那个"显示一次"用了**全局**标志，于是只有第一扇窗被显示过 | 标志改成**每扇窗各自一个**（`shown[idx]`）；并且 `slot.visible` 让自测能验"真的可见" |
+| 7 | **重建出来的窗口一直看不见** | "显示一次"用了**全局**标志，只有第一扇窗被显示过 | 标志改成**每扇窗各自一个**（`shown[idx]`）；`slot.visible` 让自测能验"真的可见" |
 | 8 | 屏幕探针读不到圆 | 分层窗口是 DWM 合成的，`GetPixel(GetDC(NULL))` 读不到它 | 自测改成**读画布**（`UpdateLayeredWindow` 交上去的那张图） |
-| 9 | **真实鼠标点击收不到** | `WM_NCHITTEST` 无条件返回 `HTCAPTION`（整窗当标题栏拖拽），点击被系统吃掉 | 默认 `HTCLIENT`；可拖改成客户端点名的 `WINMSG_F_DRAGGABLE` |
+| 9 | **真实鼠标点击收不到** | `WM_NCHITTEST` 无条件返回 `HTCAPTION`，点击被系统当拖拽吃掉 | 默认 `HTCLIENT`；可拖改成客户端点名的 `WINMSG_F_DRAGGABLE` |
 | 10 | 用户拖动之后窗口"弹回去" | 拖动改了系统里的位置，但目录里的 `slot.cur` 没跟上 | `WM_MOVE`/`WM_SIZE` 把系统认的矩形写回 `cur` |
-| 11 | 自愈之后 `WM_CLOSE` 收不到 | 窗口被拆时目录格子清零，订阅跟着没了；自愈只 `winmsg_open` 没重新订阅 | 统一走 `winmsg_open_ex`（登记 + 订阅 + 可拖） |
+| 11 | 自愈之后 `WM_CLOSE` 收不到 | 窗口被拆时目录格子清零，订阅跟着没了；自愈只 `winmsg_open` 没重新订阅 | 统一走 `winmsg_open_ex` |
 | 12 | 注入的滚轮坐标是错的 | 注入时用了客户区坐标，而 `WM_MOUSEWHEEL` 的 `lParam` 按约定是屏幕坐标 | 注入前 `ClientToScreen` |
 
 ---
@@ -396,17 +382,17 @@ MDPSR_EXPORT int mdpsr_handle_myplugin_Tick(const mdpsr_msg* msg, const uint8_t*
 
 ### 怎么编出能跑 GUI 自测的那一套（`Mode=TXST1`）
 
-GUI 自测要 `winmsg`（broker）+ `paint` + `test/` 里的 `circ_a`/`circ_b`/`circ_c`，
-`TXST1` 这个 `Mode` 就是照着这个夹具要求推出来的：
+GUI 自测要 `winmsg`（broker）+ `paint` + `test/` 里的 `circ_a`/`circ_b`/`circ_c`，`TXST1` 这个 `Mode`
+就是照着这个夹具要求推出来的：
 
 ```powershell
 cmake -S . -B build_TXST1 -G "Visual Studio 18 2026" -A x64 -DMode=TXST1 -DBUILD="$PWD\build_TXST1"
 cmake --build build_TXST1 --config Release --parallel
 ```
 
-生成的 `build_TXST1\config.json` 恰好是 `sysmgr / winmsg / paint / circ_a / circ_b / circ_c`
-六个 —— **顺序由根 CMakeLists 沿用 `src/main/config.json` 那份基准清单**（`winmsg` 必须
-排在 GUI 客户端前面）。所以 `winmsg` 是 TXST1 场景的一部分，不是可选项。
+生成的 `build_TXST1\config.json` 恰好是 `sysmgr / winmsg / paint / circ_a / circ_b / circ_c` ——
+**顺序由根 CMakeLists 沿用 `src/main/config.json` 那份基准清单**（`winmsg` 必须排在 GUI 客户端前面）。
+所以 `winmsg` 是 TXST1 场景的一部分，不是可选项。
 
 ### `--guitest`（几秒钟，改 GUI 的时候用）
 
@@ -414,7 +400,7 @@ cmake --build build_TXST1 --config Release --parallel
 build_TXST1\mdpsr.exe --guitest
 ```
 
-只跑 GUI 阶段，四扇窗（`paint` + `circ_a/b/c`）都在。**122 条断言**，全过退出码 0：
+只跑 GUI 阶段，四扇窗（`paint` + `circ_a/b/c`）都在。**230 条断言**，全过退出码 0：
 
 | 测试 | 怎么验 |
 | --- | --- |
@@ -431,12 +417,12 @@ build_TXST1\mdpsr.exe --guitest
 
 ### `--selftest --cycles N`
 
-先跑热插拔压力测试（4 条捣乱线程 + 真装卸 N 轮，见 README 第八节），最后接上面的 GUI 阶段。
+先跑热插拔压力测试（4 条捣乱线程 + 真装卸 N 轮，见 [总览.md](总览.md) 第八节），最后接上面的 GUI 阶段。
 `--cycles 1000` 大约 30 秒，退出码 0/3。
 
-> 它需要**全部九个插件**（`sysmgr` + 组件 + 测试夹具）：热插拔阶段要 `alpha`/`beta`/`gamma`，
-> GUI 阶段要 `circ_a/b/c` + `winmsg`/`paint`。所以 `TXST2`（只有组件）下跑不完整 ——
-> 只改 GUI 的话用 `--guitest` 就够了。
+> 它需要**全部九个插件**（`sysmgr` + 组件 + 测试夹具）：热插拔阶段要 `alpha`/`beta`/`gamma`，GUI 阶段要
+> `circ_a/b/c` + `winmsg`/`paint`。所以 `TXST2`（只有组件）下跑不完整 —— 只改 GUI 的话用 `--guitest`
+> 就够了。
 
 手动看：
 
@@ -458,7 +444,7 @@ Get-Process mdpsr | Select MainWindowTitle # 4 扇窗的标题都是 "winmsg: pa
 | 缩放是最近邻 | 放大就是像素块；要平滑/要 3D 请在客户端自己把图画成目标尺寸 |
 | 每帧成本 ≈ O(窗口像素) × 脏窗口数 | 没有脏矩形，重绘就是整张画布 `memset` + 组合 + `UpdateLayeredWindow` |
 | 一个 GUI 线程 | 所有窗口共用 `winmsg` 那条 GUI 线程；窗口特别多 / 要 GPU 时再写一个新 GUI 插件（协议不变） |
-| 目录是一把锁 | `winmsg.Screen` 是 16 个窗口共用的一条 State（控制面串行）；数据面（每窗口的 `Surface`）各自一把锁，互不阻塞 |
+| 目录是一把锁 | `winmsg.Screen` 是 16 个窗口共用的一条 State（控制面串行）；数据面（每窗口的 `Surface`）各自一把锁 |
 | 窗口事件会丢（有计数） | 客户端队列满时丢掉并记 `slot.events_dropped`，不反压 GUI 线程（慢客户端不该卡住界面） |
 | 无边框、默认全透明 | 没有标题栏/边框/系统菜单；可拖是客户端点名的；要控件得自己画在画面里 |
 | 拖动时收不到鼠标按下/抬起 | 只对 `WINMSG_F_DRAGGABLE` 的窗口成立（见 4.6）；不开可拖就是普通客户区 |
